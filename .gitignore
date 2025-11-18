@@ -1,0 +1,40 @@
+# Open .gitignore in your text editor and add:
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+.env
+*.log
+
+# Next.js / Node
+node_modules/
+.next/
+npm-debug.log
+.env.local
+.env.*.local
+
+# Build
+build/
+dist/
