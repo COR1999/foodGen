@@ -411,18 +411,23 @@ class RecipeModel:
 
     def get_or_generate_recipe(self, request: RecipeRequest) -> RecipeResponse:
         """
-        First search S3 for matching recipes, if not found generate a new one
+        First search S3 for matching recipes, if not found or match is too low, generate a new one
         """
         search_result = self.search_s3_recipes(request)
 
         if search_result:
             recipe, match_score = search_result
-            print(f"✨ Returning existing recipe from S3: {recipe.title}")
-            return RecipeResponse(
-                recipe=recipe,
-                source="s3",
-                match_score=match_score
-            )
+            
+            # Check if match score is good enough (51% or higher)
+            if match_score >= 0.51:
+                print(f"✨ Returning existing recipe from S3: {recipe.title} (match: {match_score*100:.1f}%)")
+                return RecipeResponse(
+                    recipe=recipe,
+                    source="s3",
+                    match_score=match_score
+                )
+            else:
+                print(f"⚠️ Match score too low ({match_score*100:.1f}%), generating new recipe instead")
 
         print("🤖 Generating new recipe with AI")
         recipe = self.generate_new_recipe(request)
@@ -489,15 +494,32 @@ def fastapi_app():
     def generate_recipe(request: RecipeRequest):
         """
         🔍 Search for existing recipe in S3, or generate new one if not found
-
-        This endpoint will:
-        1. Search S3 for recipes matching your ingredients (60%+ match required)
-        2. If found, return the cached recipe (faster, saves costs)
-        3. If not found, generate a new recipe with AI
         """
         result = recipe_model.get_or_generate_recipe(request)
-        return result.model_dump()
-
+        
+        # Add debug logging
+        print("=" * 50)
+        print("📤 SENDING RESPONSE TO FRONTEND:")
+        print(f"Recipe title: {result.recipe.title}")
+        print(f"Ingredients count: {len(result.recipe.ingredients)}")
+        print(f"Instructions count: {len(result.recipe.instructions)}")
+        print(f"Source: {result.source}")
+        print("=" * 50)
+        
+        # Return the recipe model directly, not from model_dump
+        return {
+            "recipe": {
+                "title": result.recipe.title,
+                "description": result.recipe.description,
+                "ingredients": result.recipe.ingredients,
+                "instructions": result.recipe.instructions,
+                "cook_time": result.recipe.cook_time,
+                "cuisine": result.recipe.cuisine,
+            },
+            "source": result.source,
+            "match_score": result.match_score
+        }
+    
     @web_app.post("/generate-new", tags=["Recipes"])
     def force_generate_recipe(request: RecipeRequest):
         """
