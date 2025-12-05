@@ -7,7 +7,7 @@ import boto3
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple, Any
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 # ==================== DATA MODELS ====================
@@ -22,23 +22,49 @@ class RecipeRequest(BaseModel):
     skill_level: Optional[str] = None
     meal_type: Optional[str] = None
     spice_level: Optional[str] = None
+    user_id: str  # NEW: Required user ID
 
 
 class StructuredRecipe(BaseModel):
     title: str
     description: str
-    ingredients: list[str]
-    instructions: list[str]
+    ingredients: List[str]
+    instructions: List[str]
     cook_time: str
     cuisine: str
-    cooking_style: Optional[str] = None  # NEW
-
+    cooking_style: Optional[str] = None
+    servings: int = 4  # ADDED - your code uses this
+    chef_notes: Optional[str] = None  
+    user_id: Optional[str] = None  # NEW: Track user ID who generated the recipe
+    
+    class Config:
+        # Allow extra fields without error
+        extra = "ignore"
 
 class RecipeResponse(BaseModel):
     recipe: StructuredRecipe
-    source: str
+    source: str  # "s3" or "generated"
     match_score: Optional[float] = None
-
+    
+    class Config:
+        # Example for JSON serialization
+        json_schema_extra = {
+            "example": {
+                "recipe": {
+                    "title": "Classic Spaghetti Carbonara",
+                    "description": "Authentic Italian pasta with eggs, cheese, and pancetta",
+                    "ingredients": ["12 oz Spaghetti", "4 oz Pancetta", "3 Eggs"],
+                    "instructions": ["Boil pasta", "Cook pancetta", "Mix with eggs"],
+                    "cook_time": "25 minutes",
+                    "cuisine": "Italian",
+                    "cooking_style": "Traditional",
+                    "servings": 4,
+                    "chef_notes": "Use freshly grated Parmigiano-Reggiano"
+                },
+                "source": "generated",
+                "match_score": None
+            }
+        }
 
 # ==================== CONFIGURATION ====================
 
@@ -46,67 +72,65 @@ class RecipeResponse(BaseModel):
 class Config:
     MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
     CACHE_PATH = "/model-cache"
-    MIN_MATCH_SCORE = 0.6
+    MIN_MATCH_SCORE = 0.8
     COOK_TIME_WEIGHT = 0.9
-    CHEF_SYSTEM_PROMPT = """You are a meticulous Executive Chef.
-PRIMARY OBJECTIVE: Output ONLY valid JSON per the schema. No markdown, no headings, no emojis, no extra text.
+    
+     # Define the JSON schema as a Python dict for validation
+    RECIPE_SCHEMA = {
+        "type": "object",
+        "required": ["title", "description", "ingredients", "instructions", "cook_time", "cuisine", "cooking_style", "servings", "chef_notes"],
+        "properties": {
+            "chef_notes": {"type": "string"},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "ingredients": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1
+            },
+            "instructions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1
+            },
+            "cook_time": {"type": "string"},
+            "cuisine": {"type": "string"},
+            "cooking_style": {"type": "string"},
+            "servings": {"type": "integer"}
+        }
+    }
+    CHEF_SYSTEM_PROMPT = """You are a professional chef AI. You MUST output valid JSON only.
 
-CRITICAL RULES:
+CRITICAL: Your ENTIRE response must be ONLY this JSON structure. No text before or after.
 
-Ingredient–Instruction Consistency (both directions):
-
-Every edible item used in instructions MUST first appear in ingredients.
-Every ingredient must be used in at least one instruction.
-Generic-to-specific allowed (e.g., "heat the oil" matches "Vegetable Oil" or "Sesame Oil").
-Formatting:
-
-US customary units only (tsp, tbsp, cup, oz, lb, °F). Never metric (ml, g, kg, °C).
-Ingredient line format: "[quantity] [unit] [Name] [optional (note)]".
-Do NOT list cookware/tools in ingredients.
-Quantity realism (think like a chef):
-
-Default servings to 4 unless otherwise implied by user input.
-Typical baselines per 4 servings:
-• Protein: 1 to 1.5 lb total
-• Rice (uncooked): 1 to 2 cups; water 1.75–2x rice volume
-• Oil for sautéing: 1–3 tbsp total (not more than 1/4 cup)
-• Butter for finishing: 1–3 tbsp
-• Salt: 1 to 2 tsp total unless brines/rubs justify more
-• Black Pepper: 1/2 to 1 tsp
-• Aromatics: 1–4 cloves garlic, 1 small onion/shallot
-Alcohol policy:
-• Never specify “bottle”, “750 ml”, or similar.
-• For deglazing/pan sauces, use 1/4–1/2 cup wine; never exceed 1 cup total.
-• Respect cuisine: in Japanese cuisine, wine is atypical—use very sparingly (1/4 cup max) or offer rice vinegar/mirin substitution.
-Cuisine authenticity:
-
-Match flavor anchors to cuisine. For Japanese, consider combinations of: Soy Sauce, Mirin, Sake (optional), Rice Vinegar, Miso, Ginger, Garlic, Scallions, Sesame Oil, Shichimi Togarashi/Chili Flakes. Avoid overly Western anchors unless user forces them.
-If the user provides an atypical ingredient (e.g., white wine), integrate modestly or offer a substitution in parentheses.
-Spice level mapping:
-
-mild: 1/4–1/2 tsp chili flakes
-medium: 1/2–1 tsp chili flakes or 1–2 small chiles
-spicy/hot: 1–2 tsp chili flakes or 2–4 small chiles
-Sanity check BEFORE finalizing:
-
-No “bottle/carton/bag/box” quantities.
-No metric units.
-Check alcohol against policy; cap at 1/2 cup for non-braises (max 1 cup).
-Ensure oil, salt, pepper, and any stated anchors are present and within ranges.
-JSON SCHEMA:
 {
-"title": "string",
-"description": "string (1–2 sentences)",
-"ingredients": ["string"],
-"instructions": ["string"],
-"cook_time": "string",
-"cuisine": "string",
-"cooking_style": "string (the method used: fried, baked, grilled, etc.)",
-"servings": integer
+  "chef_notes": "one sentence insight",
+  "title": "Recipe Name",
+  "description": "brief description",
+  "ingredients": [
+    "30 ml Olive Oil",
+    "500 g Chicken Breast (diced)",
+    "3 cloves Garlic (minced)"
+  ],
+  "instructions": [
+    "Heat oil in pan over medium heat",
+    "Add garlic and cook 1 minute until fragrant",
+    "Add chicken and cook 8 minutes until golden"
+  ],
+  "cook_time": "25 minutes",
+  "cuisine": "Italian",
+  "cooking_style": "Pan-seared",
+  "servings": 4
 }
-"""
 
-
+Rules:
+- Copy the structure exactly
+- Use double quotes only
+- No markdown, no code blocks
+- Field names: chef_notes, title, description, ingredients, instructions, cook_time, cuisine, cooking_style, servings
+- Metric units: ml, g, kg, L, °C
+- At least 5-8 instruction steps"""
+    
 # ==================== S3 MANAGER ====================
 
 
@@ -120,8 +144,12 @@ class S3Manager:
         )
         self.bucket_name = os.environ.get("S3_BUCKET_NAME")
 
+    # ============================================================
+    # LEGACY METHODS (Keep for backward compatibility)
+    # ============================================================
+
     def upload_to_s3(self, content: str, folder: str = "responses") -> str:
-        """Upload content to S3 and return the object key"""
+        """Upload content to S3 and return the object key (LEGACY)"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             object_key = f"model_responses/{folder}/{timestamp}.json"
@@ -140,7 +168,7 @@ class S3Manager:
             return ""
 
     def get_all_recipes(self) -> List[Dict]:
-        """Get all recipes from S3"""
+        """Get all recipes from S3 (LEGACY - no user filtering)"""
         try:
             response = self.s3_client.list_objects_v2(
                 Bucket=self.bucket_name,
@@ -168,7 +196,7 @@ class S3Manager:
             return []
 
     def get_recipe(self, filename: str) -> Dict:
-        """Get a specific recipe from S3"""
+        """Get a specific recipe from S3 (LEGACY)"""
         try:
             object_key = f"model_responses/generated_recipes/{filename}"
             response = self.s3_client.get_object(
@@ -182,7 +210,7 @@ class S3Manager:
             return {}
 
     def list_recipe_files(self) -> List[Dict]:
-        """List all recipe files metadata"""
+        """List all recipe files metadata (LEGACY)"""
         try:
             response = self.s3_client.list_objects_v2(
                 Bucket=self.bucket_name,
@@ -203,6 +231,206 @@ class S3Manager:
         except Exception as e:
             print(f"Error listing recipes: {e}")
             return []
+
+    # ============================================================
+    # NEW USER-BASED METHODS
+    # ============================================================
+
+    def upload_user_recipe(self, recipe_data: Dict, user_id: str) -> str:
+        """
+        Upload a recipe to a user-specific folder
+        
+        Structure: users/{user_id}/recipes/{timestamp}.json
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            object_key = f"users/{user_id}/recipes/{timestamp}.json"
+
+            # Add user_id to the recipe data
+            recipe_data['user_id'] = user_id
+            recipe_data['created_at'] = datetime.now().isoformat()
+
+            self.s3_client.put_object(
+                Body=json.dumps(recipe_data, indent=2).encode('utf-8'),
+                Bucket=self.bucket_name,
+                Key=object_key,
+                ContentType='application/json'
+            )
+
+            print(f"✅ Uploaded user recipe to s3://{self.bucket_name}/{object_key}")
+            return object_key
+        except Exception as e:
+            print(f"⚠️ S3 upload failed: {e}")
+            return ""
+
+    def get_user_recipes(self, user_id: str) -> List[Dict]:
+        """
+        Get all recipes for a specific user
+        """
+        try:
+            prefix = f"users/{user_id}/recipes/"
+            
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=prefix
+            )
+
+            recipes = []
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    try:
+                        # Skip if it's just the folder
+                        if obj['Key'] == prefix:
+                            continue
+                            
+                        file_obj = self.s3_client.get_object(
+                            Bucket=self.bucket_name,
+                            Key=obj['Key']
+                        )
+                        recipe_data = json.loads(
+                            file_obj['Body'].read().decode('utf-8')
+                        )
+
+                        # Add metadata
+                        filename = obj['Key'].split('/')[-1]
+                        recipe_data['id'] = filename.replace('.json', '')
+                        recipe_data['filename'] = filename
+                        recipe_data['last_modified'] = obj['LastModified'].isoformat()
+
+                        recipes.append(recipe_data)
+                    except Exception as e:
+                        print(f"Error loading recipe {obj['Key']}: {e}")
+                        continue
+
+            # Sort by last_modified (newest first)
+            recipes.sort(
+                key=lambda x: x.get('last_modified', ''),
+                reverse=True
+            )
+
+            print(f"📂 Found {len(recipes)} recipes for user {user_id}")
+            return recipes
+        except Exception as e:
+            print(f"Error fetching user recipes: {e}")
+            return []
+
+    def get_user_recipe(self, user_id: str, filename: str) -> Optional[Dict]:
+        """
+        Get a specific recipe for a user
+        """
+        try:
+            if not filename.endswith('.json'):
+                filename = f"{filename}.json"
+
+            object_key = f"users/{user_id}/recipes/{filename}"
+
+            response = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key=object_key
+            )
+            recipe_data = json.loads(response['Body'].read().decode('utf-8'))
+
+            # Add metadata
+            recipe_data['id'] = filename.replace('.json', '')
+            recipe_data['filename'] = filename
+
+            return recipe_data
+        except self.s3_client.exceptions.NoSuchKey:
+            print(f"Recipe not found: {filename}")
+            return None
+        except Exception as e:
+            print(f"Error fetching recipe: {e}")
+            return None
+
+    def delete_user_recipe(self, user_id: str, filename: str) -> Tuple[bool, str]:
+        """
+        Delete a recipe only if it belongs to the user
+        
+        Returns: (success: bool, message: str)
+        """
+        try:
+            if not filename.endswith('.json'):
+                filename = f"{filename}.json"
+
+            object_key = f"users/{user_id}/recipes/{filename}"
+
+            # Check if file exists first
+            try:
+                self.s3_client.head_object(
+                    Bucket=self.bucket_name,
+                    Key=object_key
+                )
+            except self.s3_client.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == '404':
+                    return False, "Recipe not found or you don't have permission to delete it"
+                raise e
+
+            # Delete the file
+            self.s3_client.delete_object(
+                Bucket=self.bucket_name,
+                Key=object_key
+            )
+
+            print(f"🗑️ Deleted recipe: {object_key}")
+            return True, "Recipe deleted successfully"
+        except Exception as e:
+            print(f"❌ Error deleting recipe: {e}")
+            return False, str(e)
+
+    def get_user_recipe_count(self, user_id: str) -> int:
+        """
+        Get the number of recipes a user has
+        """
+        try:
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=f"users/{user_id}/recipes/"
+            )
+
+            if 'Contents' in response:
+                # Subtract 1 if the folder itself is counted
+                return len([
+                    obj for obj in response['Contents']
+                    if obj['Key'].endswith('.json')
+                ])
+            return 0
+        except Exception as e:
+            print(f"Error counting recipes: {e}")
+            return 0
+
+    def search_user_recipes(self, user_id: str, query: str) -> List[Dict]:
+        """
+        Search a user's recipes by title, cuisine, or ingredients
+        """
+        recipes = self.get_user_recipes(user_id)
+        query = query.lower()
+
+        results = []
+        for recipe in recipes:
+            # Search in title
+            if query in recipe.get('title', '').lower():
+                results.append(recipe)
+                continue
+
+            # Search in cuisine
+            if query in recipe.get('cuisine', '').lower():
+                results.append(recipe)
+                continue
+
+            # Search in description
+            if query in recipe.get('description', '').lower():
+                results.append(recipe)
+                continue
+
+            # Search in ingredients
+            ingredients = recipe.get('ingredients', [])
+            for ingredient in ingredients:
+                if query in ingredient.lower():
+                    results.append(recipe)
+                    break
+
+        return results
+
 
 # ==================== RECIPE MATCHER ====================
 
@@ -327,7 +555,6 @@ class RecipeModel:
     """Main AI recipe generation model"""
 
     def __init__(self, cache_path: str):
-        # Import torch/transformers here to avoid loading until needed
         import torch
         from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
@@ -350,75 +577,81 @@ class RecipeModel:
             cache_dir=cache_path
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # Initialize managers
         self.s3_manager = S3Manager()
-
         print("✅ Model loaded successfully.")
 
-    def _clean_json_response(self, response_text: str) -> str:
-        """Clean common JSON formatting issues from LLM responses"""
-        response_text = re.sub(
-            r'^```json\s*', '', response_text, flags=re.MULTILINE)
-        response_text = re.sub(
-            r'^```\s*$', '', response_text, flags=re.MULTILINE)
-        response_text = response_text.strip()
-        response_text = re.sub(r'\.\s*(\}|\])', r'\1', response_text)
-        response_text = re.sub(r',\s*(\}|\])', r'\1', response_text)
-
-        match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if match:
-            response_text = match.group(0)
-
-        return response_text
-
-    def _repair_and_parse_json(self, json_str: str) -> Dict:
-        """Attempts to fix common LLM JSON errors before parsing"""
+    def _clean_and_parse_json(self, response_text: str) -> Dict[str, Any]:
+        """
+        Super simple parser - just extract and validate.
+        """
+        print(f"\n{'='*70}")
+        print("PARSING LLM RESPONSE")
+        print(f"{'='*70}")
+        
+        text = response_text.strip()
+        
+        # Remove markdown if present
+        if '```' in text:
+            text = text.split('```')[1]
+            if text.startswith('json'):
+                text = text[4:]
+            text = text.strip()
+        
+        # Extract JSON
+        start = text.find('{')
+        end = text.rfind('}')
+        
+        if start == -1 or end == -1:
+            print("❌ No JSON found")
+            return self._get_default_recipe()
+        
+        json_str = text[start:end + 1]
+        
+        # Try to parse
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            # Fix 1: Remove trailing commas in arrays/objects
-            json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
-            # Fix 2: Handle unescaped newlines
-            json_str = json_str.replace('\n', ' ')
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                print(f"❌ CRITICAL JSON FAILURE: {json_str[:50]}...")
-                raise
+            data = json.loads(json_str)
+            print("✅ JSON parsed successfully")
+            
+            # Quick validation
+            required = ["title", "ingredients", "instructions"]
+            if all(k in data and data[k] for k in required):
+                if len(data["ingredients"]) >= 2 and len(data["instructions"]) >= 3:
+                    print(f"✅ Valid recipe: {len(data['ingredients'])} ingredients, {len(data['instructions'])} steps")
+                    return self._normalize_fields(data)
+            
+            print("⚠️  Incomplete recipe data")
+            return self._get_default_recipe()
+            
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON parse failed: {str(e)[:100]}")
+            print(f"Sample: {json_str[:300]}")
+            return self._get_default_recipe()
 
-    def _validate_consistency(self, recipe_data: Dict) -> Dict:
-        """
-        Ensures basic staples are present if referenced in instructions.
-        Adds minimal, sane quantities with notes when missing.
-        """
-        instructions_text = " ".join(
-            recipe_data.get('instructions', [])).lower()
-        ingredients_blob = " ".join(recipe_data.get('ingredients', [])).lower()
-
-        # Common staples that LLMs often forget to list, mapped to a Formal Name
-        staples = {
-            "salt": "1 tsp Kosher Salt (or to taste)",
-            "pepper": "1/2 tsp Black Pepper",
-            "oil": "1 tbsp Vegetable Oil (for sautéing)",
-            "butter": "1 tbsp Unsalted Butter",
-            "water": "1 cup Water"
+    def _normalize_fields(self, data: Dict) -> Dict:
+        """Minimal normalization"""
+        # Ensure all required fields exist
+        defaults = {
+            "chef_notes": "",
+            "title": "Generated Recipe",
+            "description": "A delicious dish",
+            "ingredients": [],
+            "instructions": [],
+            "cook_time": "30 minutes",
+            "cuisine": "Fusion",
+            "cooking_style": "Traditional",
+            "servings": 4
         }
-
-        for key, line in staples.items():
-            if key in instructions_text and key not in ingredients_blob:
-                print(f"🔧 Auto-Fix: Adding missing '{line}' to ingredients.")
-                recipe_data.setdefault("ingredients", []).append(line)
-
-        return recipe_data
-
-    def _apply_quantity_sanity_caps(self, data: Dict) -> Dict:
-        """
-        Clamp unrealistic quantities, avoid container units, prefer US customary units,
-        and enforce light-touch Japanese anchors if cuisine is Japanese.
-        """
-        if "ingredients" not in data or not isinstance(data["ingredients"], list):
-            return data
+        
+        for key, default in defaults.items():
+            if key not in data:
+                data[key] = default
+        
+        # Clean strings
+        for key in ["title", "description", "chef_notes", "cuisine", "cooking_style", "cook_time"]:
+            if isinstance(data[key], str):
+                data[key] = data[key].strip().strip('"\'').strip()
+        
+        return data
 
     def search_s3_recipes(self, request: RecipeRequest) -> Optional[Tuple[StructuredRecipe, float]]:
         """
@@ -437,372 +670,381 @@ class RecipeModel:
         return RecipeMatcher.find_best_match(recipes, request)
 
     def _build_chef_prompt(self, request: RecipeRequest) -> str:
-        """Build context-aware chef prompt"""
-
-        # Get the right chef
+        """Build minimal, clear prompt"""
+        
         persona = ChefPersonaBuilder.build_persona(request.cuisine)
-
-        # Analyze ingredients
-        analysis = IngredientAnalyzer.detect_conflicts(
-            request.ingredients,
-            request.cuisine
-        )
-
-        # Build the prompt dynamically
-        prompt_parts = [
-            f"You are {persona['name']}, {persona['background']}.",
-            f"\nA customer brings you these ingredients: {', '.join(request.ingredients)}."
-        ]
-
-        if request.cuisine:
-            prompt_parts.append(f"\nThey want {request.cuisine} cuisine.")
-
-        # Handle conflicts intelligently
-        if analysis["has_conflict"]:
-            conflict_text = []
-            for c in analysis["conflicts"]:
-                conflict_text.append(
-                    f"• {c['ingredient']} is {c['suggestion']}")
-
-            prompt_parts.append(
-                f"\n\n⚠️ NOTE: You notice some ingredients are atypical:\n" +
-                "\n".join(conflict_text) +
-                f"\n\nAs a professional, you will either:"
-                f"\n1. Use them VERY sparingly (e.g., 2-3 tbsp max if liquid)"
-                f"\n2. Explain why you're adapting the dish in chef_notes"
-                f"\n3. Substitute with traditional ingredients from your kitchen: {', '.join(analysis['staples'][:5])}"
-            )
-
-        # Add kitchen context
-        prompt_parts.append(
-            f"\n\n🍳 YOUR KITCHEN IS FULLY STOCKED WITH:"
-            f"\n- Essential staples: {', '.join(analysis['staples'][:8])}"
-            f"\n- Typical cooking fat: {analysis['typical_fats']}"
-            f"\n- Standard proteins, vegetables, herbs, and spices"
-        )
-
         
+        # Build ingredient list
+        ing_list = '\n'.join(f'- {ing}' for ing in request.ingredients) if request.ingredients else "Use appropriate ingredients"
         
-        # MEAL TYPE APPROPRIATENESS (if specified)
-        if request.meal_type:
-            meal_lower = request.meal_type.lower()
-            
-            meal_guidelines = {
-                "breakfast": {
-                    "appropriate": [
-                        "eggs (scrambled, fried, poached, omelettes)",
-                        "pancakes, waffles, french toast",
-                        "breakfast meats (bacon, sausage, ham)",
-                        "oatmeal, granola, cereal",
-                        "breakfast sandwiches (egg-based)",
-                        "smoothies, yogurt bowls",
-                        "breakfast burritos/tacos (egg-based)",
-                        "muffins, scones, pastries"
-                    ],
-                    "inappropriate": [
-                        "burgers, cheeseburgers",
-                        "heavy pasta dishes",
-                        "steaks, roasts",
-                        "fried chicken (dinner-style)",
-                        "tacos/burritos without eggs",
-                        "pizza",
-                        "casseroles (unless breakfast casserole)"
-                    ],
-                    "guidance": "Focus on lighter, morning-appropriate dishes. If user's ingredients suggest a lunch/dinner dish (like beef → burgers), TRANSFORM it into a breakfast version (like beef breakfast hash or steak and eggs)."
-                },
-                "lunch": {
-                    "appropriate": [
-                        "sandwiches, wraps",
-                        "salads with protein",
-                        "soups, light stews",
-                        "pasta dishes (lighter portions)",
-                        "tacos, burritos",
-                        "grain bowls",
-                        "lighter meat dishes"
-                    ],
-                    "inappropriate": [
-                        "pancakes, waffles",
-                        "heavy roasts (save for dinner)",
-                        "breakfast cereals"
-                    ],
-                    "guidance": "Create satisfying but not overly heavy dishes. Portions should be moderate."
-                },
-                "dinner": {
-                    "appropriate": [
-                        "steaks, roasts, braised meats",
-                        "pasta dishes (hearty)",
-                        "casseroles",
-                        "grilled meats and fish",
-                        "curries, stews",
-                        "pizza",
-                        "burgers (dinner-appropriate)"
-                    ],
-                    "inappropriate": [
-                        "pancakes, waffles",
-                        "breakfast cereals",
-                        "muffins, scones"
-                    ],
-                    "guidance": "Create hearty, satisfying dishes. This is the main meal of the day."
-                },
-                "snack": {
-                    "appropriate": [
-                        "dips and spreads",
-                        "finger foods",
-                        "small bites, appetizers",
-                        "chips, crackers with toppings",
-                        "vegetable sticks with dip",
-                        "small portions"
-                    ],
-                    "inappropriate": [
-                        "full meals",
-                        "large portions",
-                        "multi-course dishes"
-                    ],
-                    "guidance": "Keep it small, portable, and easy to eat with hands or minimal utensils."
-                },
-                "dessert": {
-                    "appropriate": [
-                        "cakes, pies, cookies",
-                        "ice cream dishes",
-                        "puddings, custards",
-                        "fruit-based sweets",
-                        "chocolate dishes"
-                    ],
-                    "inappropriate": [
-                        "savory main dishes",
-                        "breakfast items (unless dessert-style)"
-                    ],
-                    "guidance": "Focus on sweet endings to meals. Transform savory ingredients creatively if needed."
-                }
-            }
-            
-            guidelines = meal_guidelines.get(meal_lower, {
-                "guidance": f"Create an appropriate {request.meal_type} dish."
-            })
-            
-            prompt_parts.append(
-                f"\n\n🍽️ MEAL TYPE: {request.meal_type.upper()}"
-            )
-            
-            if "appropriate" in guidelines:
-                prompt_parts.append(
-                    f"\n✅ APPROPRIATE for {request.meal_type}:\n   " + 
-                    "\n   ".join(f"• {item}" for item in guidelines["appropriate"][:6])
-                )
-            
-            if "inappropriate" in guidelines:
-                prompt_parts.append(
-                    f"\n❌ INAPPROPRIATE for {request.meal_type}:\n   " + 
-                    "\n   ".join(f"• {item}" for item in guidelines["inappropriate"][:6])
-                )
-            
-            prompt_parts.append(
-                f"\n📋 GUIDANCE: {guidelines['guidance']}"
-            )
-            
-            # Special transformation logic for common conflicts
-            if meal_lower == "breakfast":
-                prompt_parts.append(
-                    f"\n\n💡 TRANSFORMATION EXAMPLES:"
-                    f"\n   • User has beef → Make 'Beef Breakfast Hash' or 'Steak and Eggs', NOT burgers"
-                    f"\n   • User has chicken → Make 'Chicken Breakfast Sausage Patties', NOT fried chicken"
-                    f"\n   • User has pasta → Make 'Breakfast Pasta Frittata', NOT spaghetti"
-                    f"\n   • User has rice → Make 'Savory Breakfast Rice Bowl with Egg', NOT fried rice"
-                )
+        prompt = f"""You are {persona['name']}.
+
+    Create a {request.cuisine or 'delicious'} recipe using these ingredients:
+    {ing_list}
+
+    {f'Meal type: {request.meal_type}' if request.meal_type else ''}
+    {f'Cooking style: {request.cooking_style}' if request.cooking_style else ''}
+    {f'Spice level: {request.spice_level}' if request.spice_level else ''}
+
+    Output ONLY valid JSON. No other text.
+
+    {{
+    "chef_notes": "your insight here",
+    "title": "Recipe Name",
+    "description": "description here",
+    "ingredients": ["30 ml item1", "500 g item2"],
+    "instructions": ["step 1", "step 2", "step 3"],
+    "cook_time": "XX minutes",
+    "cuisine": "{request.cuisine or 'Fusion'}",
+    "cooking_style": "{request.cooking_style or 'Traditional'}",
+    "servings": 4
+    }}"""
         
-        # COOKING STYLE ENFORCEMENT (Strong)
-        if request.cooking_style:
-            style_lower = request.cooking_style.lower()
-
-            # Specific instructions per cooking method
-            style_guidance = {
-                "fried": {
-                    "method": "pan-fry or deep-fry",
-                    "requirements": "Heat oil (2-4 tbsp for pan-fry, 2-4 cups for deep-fry) to 350-375°F. Fry until golden and crispy. Do NOT bake, braise, or boil.",
-                    "title_must_include": "Fried, Pan-Fried, or Crispy"
-                },
-                "baked": {
-                    "method": "bake in oven",
-                    "requirements": "Preheat oven to specific temperature (325-425°F). Bake for specified time. Do NOT pan-fry, boil, or grill.",
-                    "title_must_include": "Baked or Oven-"
-                },
-                "grilled": {
-                    "method": "grill over direct heat",
-                    "requirements": "Preheat grill to medium-high heat. Grill with lid closed, flipping once. Do NOT bake or fry in a pan.",
-                    "title_must_include": "Grilled"
-                },
-                "steamed": {
-                    "method": "steam",
-                    "requirements": "Set up steamer basket over boiling water. Steam until cooked through. Do NOT fry or bake.",
-                    "title_must_include": "Steamed"
-                },
-                "roasted": {
-                    "method": "roast in oven at high heat",
-                    "requirements": "Preheat oven to 400-450°F. Roast until caramelized and tender. Do NOT boil or steam.",
-                    "title_must_include": "Roasted"
-                },
-                "sauteed": {
-                    "method": "sauté in a pan",
-                    "requirements": "Heat 1-3 tbsp oil or butter in pan over medium-high heat. Sauté, stirring frequently, until cooked through. Do NOT bake or steam.",
-                    "title_must_include": "Sautéed or Pan-"
-                },
-                "boiled": {
-                    "method": "boil in liquid",
-                    "requirements": "Bring water or broth to a rolling boil. Add ingredients and boil until tender. Do NOT fry or bake.",
-                    "title_must_include": "Boiled"
-                },
-                "slow cooked": {
-                    "method": "slow cook or braise",
-                    "requirements": "Cook low and slow (slow cooker, dutch oven, or oven at 250-300°F for 2+ hours). Do NOT pan-fry or quick-cook.",
-                    "title_must_include": "Braised, Slow-Cooked, or Stewed"
-                },
-                "braised": {
-                    "method": "braise",
-                    "requirements": "Sear first, then cook covered in liquid in oven or stovetop at low heat (300°F or low simmer) for 1.5+ hours. Do NOT fry or grill.",
-                    "title_must_include": "Braised"
-                }
-            }
-
-            guidance = style_guidance.get(style_lower, {
-                "method": request.cooking_style,
-                "requirements": f"Use {request.cooking_style} cooking method throughout.",
-                "title_must_include": request.cooking_style.title()
-            })
-
-            prompt_parts.append(
-                f"\n\n🔥 COOKING METHOD REQUIREMENT (MANDATORY - NON-NEGOTIABLE):"
-                f"\nMethod: You MUST {guidance['method']} this dish."
-                f"\nRequirements: {guidance['requirements']}"
-                f"\nTitle MUST include: '{guidance['title_must_include']}'"
-                f"\n\n❌ FORBIDDEN: Any cooking method other than {request.cooking_style} is INCORRECT and UNACCEPTABLE."
-                f"\n✅ CORRECT: Every instruction step must support the {request.cooking_style} method."
-            )
-
-        # Spice level
-        spice_map = {
-            "mild": "very gentle heat (1/4 tsp chili or red pepper flakes)",
-            "medium": "moderate heat (1/2-1 tsp chili or 1-2 small chiles)",
-            "spicy": "bold heat (1-2 tsp chili or 2-3 fresh chilis)",
-            "hot": "intense heat (2+ tsp chili or 4+ fresh chilis)"
-        }
-        if request.spice_level:
-            prompt_parts.append(
-                f"\n\n🌶️ SPICE LEVEL: {request.spice_level.upper()} ({spice_map.get(request.spice_level.lower(), 'moderate')})"
-            )
-
-        # Chef thinking framework
-        prompt_parts.append("""
-
-    YOUR TASK:
-    1. Decide what dish to make (consider the customer's ingredients + your expertise + COOKING METHOD)
-    2. Gather ALL needed ingredients from your kitchen (remember: customers have ONLY what they listed)
-    3. Write the complete recipe using the REQUIRED cooking method
-
-    PORTION SIZES (default to 4 servings):
-    - Protein: 1-1.5 lb total
-    - Rice/grains: 1-2 cups uncooked
-    - Liquids for cooking: measured in tbsp or cups, NEVER "bottles", "cartons", or "containers"
-    - Oil for cooking: 1-3 tbsp for sautéing; 2-4 cups for deep-frying
-    - Alcohol (if used): 1/4 to 1/2 cup MAX for deglazing; 1 cup MAX for braises
-
-    CRITICAL RULES:
-    1. Every ingredient used in instructions MUST be listed in ingredients first
-    2. Every ingredient listed MUST be used in at least one instruction
-    3. Use US customary units ONLY (tsp, tbsp, cup, oz, lb, °F) - NO metric (ml, g, kg, °C)
-    4. The cooking method dictates the ENTIRE recipe - if user said "fried", you CANNOT braise or bake
-
-    OUTPUT FORMAT: Valid JSON only, no markdown, no code blocks, no extra text.
-    {
-    "chef_notes": "1 brief sentence about your dish decision and cooking method choice",
-    "title": "string (MUST reflect the cooking method)",
-    "description": "string (1-2 sentences)",
-    "ingredients": ["qty unit Name (optional note)"],
-    "instructions": ["step-by-step using the required cooking method"],
-    "cook_time": "X minutes",
-    "cuisine": "string",
-    "cooking_style": "string (echo back the exact method: fried, baked, grilled, etc.)"
-    }""")
-
-        return "\n".join(prompt_parts)
-
+        return prompt
+        
     def generate_new_recipe(self, request: RecipeRequest) -> StructuredRecipe:
-        """Generate recipe with dynamic chef persona"""
-
-        # Build smart, context-aware prompt
-        chef_prompt = self._build_chef_prompt(request)
-
-        chat = [{"role": "user", "content": chef_prompt}]
-
-        formatted_prompt = self.tokenizer.apply_chat_template(
-            chat, tokenize=False, add_generation_prompt=True
-        )
-
-        inputs = self.tokenizer(
-            formatted_prompt, return_tensors="pt").to(self.model.device)
-
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=1200,
-            pad_token_id=self.tokenizer.eos_token_id,
-            do_sample=True,
-            temperature=0.65,  # Balanced
-            top_p=0.92,
-            repetition_penalty=1.15
-        )
-
-        response_text = self.tokenizer.decode(
-            outputs[0][inputs.input_ids.shape[-1]:],
-            skip_special_tokens=True
-        )
-
-        # Clean and parse
-        cleaned = self._clean_json_response(response_text)
-
-        try:
-            data = self._repair_and_parse_json(cleaned)
-            # Validate meal type appropriateness
-            if not self._validate_meal_type_appropriateness(data, request):
-                print("🔄 Recipe doesn't match meal type, will regenerate...")
-                # You could either:
-                # Option A: Raise an error to trigger regeneration
-                raise ValueError(f"Generated recipe not appropriate for {request.meal_type}")
+        """Simplified generation with retries"""
+        
+        max_attempts = 3
+        
+        for attempt in range(1, max_attempts + 1):
+            print(f"\n{'='*70}")
+            print(f"ATTEMPT {attempt}/{max_attempts}")
+            print(f"{'='*70}")
             
-        except Exception as e:
-            print(f"❌ Parse failed: {e}")
-            print(f"Raw output: {response_text[:300]}")
-            raise
+            try:
+                # Build prompt
+                prompt = self._build_chef_prompt(request)
+                
+                # Format for model
+                chat = [
+                    {"role": "system", "content": Config.CHEF_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ]
+                
+                formatted = self.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+                inputs = self.tokenizer(formatted, return_tensors="pt").to(self.model.device)
+                
+                # Generate
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=1200,
+                    temperature=0.7,
+                    top_p=0.9,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+                
+                response = self.tokenizer.decode(
+                    outputs[0][inputs.input_ids.shape[-1]:],
+                    skip_special_tokens=True
+                )
+                
+                print(f"Response length: {len(response)} chars")
+                
+                # Parse
+                data = self._clean_and_parse_json(response)
+                
+                # Check if it's the default error recipe
+                if data["title"] == "Recipe Generation Failed":
+                    if attempt < max_attempts:
+                        print(f"⚠️  Retrying...")
+                        continue
+                
+                # Build recipe object
+                recipe = StructuredRecipe(**data)
+                
+                # Cache to S3
+                try:
+                    self.s3_manager.upload_to_s3(
+                        json.dumps(recipe.model_dump(), indent=2),
+                        folder="generated_recipes"
+                    )
+                except:
+                    pass
+                
+                print(f"✅ SUCCESS: {recipe.title}")
+                return recipe
+                
+            except Exception as e:
+                print(f"❌ Attempt {attempt} failed: {str(e)[:100]}")
+                if attempt >= max_attempts:
+                    return StructuredRecipe(**self._get_default_recipe())
+        
+        return StructuredRecipe(**self._get_default_recipe())
+        
+    def _validate_recipe_comprehensive(self, data: dict, request: RecipeRequest) -> dict:
+        """Comprehensive validation of generated recipe against requirements"""
+        
+        issues = []
+        is_valid = True
+        
+        # 1. Check required fields
+        required_fields = ["title", "description", "ingredients", "instructions", "cook_time", "cuisine"]
+        for field in required_fields:
+            if field not in data or not data[field]:
+                issues.append(f"Missing or empty field: {field}")
+                is_valid = False
+        
+        # 2. Validate meal type appropriateness
+        if request.meal_type and not self._validate_meal_type_appropriateness(data, request):
+            issues.append(f"Recipe not appropriate for {request.meal_type}")
+            is_valid = False
+        
+        # 3. Validate cooking method
+        if request.cooking_style and not self._validate_cooking_method(data, request):
+            issues.append(f"Recipe doesn't use {request.cooking_style} method properly")
+            is_valid = False
+        
+        # 4. Check ingredient usage
+        if request.ingredients:
+            missing_ingredients = self._check_ingredient_usage(data, request)
+            if missing_ingredients:
+                issues.append(f"Customer ingredients not used: {', '.join(missing_ingredients)}")
+                is_valid = False
+        
+        # 5. Validate portions
+        portion_issues = self._validate_portions(data)
+        if portion_issues:
+            issues.extend(portion_issues)
+            # Don't invalidate for portion issues, just note them
+        
+        return {
+            'is_valid': is_valid,
+            'issues': issues
+        }
+        
+    def _normalize_recipe_fields(self, data: dict, request: RecipeRequest) -> dict:
+        """Normalize fields that LLM might return in unexpected formats"""
+        
+        # Fix cooking_style if it's a list
+        if "cooking_style" in data:
+            if isinstance(data["cooking_style"], list):
+                # Take the first item if it's a list
+                if data["cooking_style"]:
+                    data["cooking_style"] = data["cooking_style"][0]
+                    print(f"   Fixed cooking_style from list to: {data['cooking_style']}")
+                else:
+                    data["cooking_style"] = request.cooking_style or "varied"
+            elif not isinstance(data["cooking_style"], str):
+                data["cooking_style"] = str(data["cooking_style"])
+        
+        # Fix cuisine if it's a list
+        if "cuisine" in data:
+            if isinstance(data["cuisine"], list):
+                if data["cuisine"]:
+                    data["cuisine"] = data["cuisine"][0]
+                    print(f"   Fixed cuisine from list to: {data['cuisine']}")
+                else:
+                    data["cuisine"] = request.cuisine or "Fusion"
+            elif not isinstance(data["cuisine"], str):
+                data["cuisine"] = str(data["cuisine"])
+        
+        # Fix title if it's not a string
+        if "title" in data and not isinstance(data["title"], str):
+            data["title"] = str(data["title"])
+        
+        # Fix description if it's not a string
+        if "description" in data and not isinstance(data["description"], str):
+            data["description"] = str(data["description"])
+        
+        # Fix cook_time if it's not a string
+        if "cook_time" in data and not isinstance(data["cook_time"], str):
+            data["cook_time"] = str(data["cook_time"])
+        
+        # Ensure instructions is a list of strings
+        if "instructions" in data:
+            if not isinstance(data["instructions"], list):
+                data["instructions"] = [str(data["instructions"])]
+            else:
+                data["instructions"] = [str(item) for item in data["instructions"]]
+        
+        # Ensure ingredients is a list of strings (already handled by _normalize_ingredients but double-check)
+        if "ingredients" in data:
+            if not isinstance(data["ingredients"], list):
+                data["ingredients"] = [str(data["ingredients"])]
+        
+        return data
 
-        # Light validation (just ensure required fields exist)
-        required = ["title", "description", "ingredients", "instructions", "cook_time", "cuisine"]
-        for field in required:
-            if field not in data:
-                raise ValueError(f"Missing field: {field}")
+    def _validate_meal_type_appropriateness(self,   data: dict, request: RecipeRequest) -> bool:
+        """Check if generated recipe matches requested meal type"""
+        
+        if not request.meal_type:
+            return True
+        
+        title_lower = data.get("title", "").lower()
+        meal_type = request.meal_type.lower()
+        
+        # Keywords that indicate meal types
+        meal_indicators = {
+            "breakfast": ["breakfast", "morning", "scrambled", "pancake", "waffle", "omelette", 
+                        "frittata", "hash", "eggs", "oatmeal", "porridge"],
+            "lunch": ["sandwich", "wrap", "salad", "soup", "bowl", "panini"],
+            "dinner": ["roast", "braised", "steak", "grilled", "curry", "stew"],
+            "snack": ["dip", "chips", "bites", "appetizer", "finger"],
+            "dessert": ["cake", "cookie", "pie", "sweet", "chocolate", "ice cream", "pudding"]
+        }
+        
+        # Check if title contains appropriate keywords
+        if meal_type in meal_indicators:
+            keywords = meal_indicators[meal_type]
+            if any(keyword in title_lower for keyword in keywords):
+                return True
+        
+        # Check instructions for meal-specific preparation
+        instructions_text = " ".join(data.get("instructions", [])).lower()
+        if meal_type == "breakfast" and "eggs" in instructions_text:
+            return True
+        
+        return False  # Be lenient - only fail if clearly wrong
 
-        # FIX INGREDIENTS - Add this order:
-        data = self._normalize_ingredients(data)        # NEW - normalize arrays to strings
-        data = self._apply_light_quantity_fixes(data)   # existing - fix ml/g/bottles
+    def _validate_cooking_method(self, data: dict, request: RecipeRequest) -> bool:
+        """Validate that recipe uses requested cooking method"""
+        
+        if not request.cooking_style:
+            return True
+        
+        title_lower = data.get("title", "").lower()
+        instructions_text = " ".join(data.get("instructions", [])).lower()
+        cooking_style = request.cooking_style.lower()
+        
+        # Method indicators
+        method_keywords = {
+            "fried": ["fry", "fried", "crispy", "golden brown", "oil temperature"],
+            "baked": ["bake", "oven", "preheat", "degrees F"],
+            "grilled": ["grill", "char", "marks", "barbecue"],
+            "steamed": ["steam", "steamer", "covered"],
+            "roasted": ["roast", "oven", "caramelized"],
+            "sauteed": ["sauté", "pan", "stir frequently"],
+            "boiled": ["boil", "simmer", "rolling boil"],
+            "braised": ["braise", "sear", "liquid", "covered"],
+            "stir fried": ["stir-fry", "wok", "high heat", "toss"]
+        }
+        
+        if cooking_style in method_keywords:
+            keywords = method_keywords[cooking_style]
+            # Check both title and instructions
+            if any(kw in title_lower or kw in instructions_text for kw in keywords):
+                return True
+        
+        return False
+    
+    
+    def _check_ingredient_usage(self, data: dict, request: RecipeRequest) -> list:
+        """Check if all customer ingredients are used"""
+        
+        recipe_ingredients = " ".join(data.get("ingredients", [])).lower()
+        instructions = " ".join(data.get("instructions", [])).lower()
+        
+        missing = []
+        for ingredient in request.ingredients:
+            ing_lower = ingredient.lower()
+            # Check if ingredient appears in either ingredients list or instructions
+            if ing_lower not in recipe_ingredients and ing_lower not in instructions:
+                # Check for common variations
+                if not self._ingredient_has_variation(ing_lower, recipe_ingredients + " " + instructions):
+                    missing.append(ingredient)
+        
+        return missing
+    
+    def _validate_portions(self, data: dict) -> list:
+        """Validate portion sizes are reasonable"""
+        
+        issues = []
+        ingredients = data.get("ingredients", [])
+        
+        # Check for excessive quantities
+        for ing in ingredients:
+            ing_lower = ing.lower()
+            
+            # Check for container problems
+            if "bottle" in ing_lower or "carton" in ing_lower or "package" in ing_lower:
+                issues.append(f"Container quantity found: {ing}")
+            
+            # Check for metric units
+            if re.search(r'\d+\s*(ml|g|kg|l)\b', ing_lower):
+                issues.append(f"Metric unit found: {ing}")
+            
+            # Check for excessive oil (more than 1 cup for non-deep-frying)
+            if "oil" in ing_lower:
+                oil_match = re.search(r'(\d+)\s*cup', ing_lower)
+                if oil_match and int(oil_match.group(1)) > 4:
+                    issues.append(f"Excessive oil quantity: {ing}")
+            
+            # Check for excessive alcohol
+            if any(alcohol in ing_lower for alcohol in ["wine", "beer", "vodka", "rum", "whiskey"]):
+                if "bottle" in ing_lower or re.search(r'[2-9]\s*cup', ing_lower):
+                    issues.append(f"Excessive alcohol: {ing}")
+        
+        # Check servings
+        servings = data.get("servings", 4)
+        if servings < 1 or servings > 12:
+            issues.append(f"Unusual serving size: {servings}")
+        
+        return issues
 
-        # Build recipe
-        recipe = StructuredRecipe(
-            title=data["title"],
-            description=data["description"],
-            ingredients=data["ingredients"],
-            instructions=data["instructions"],
-            cook_time=data["cook_time"],
-            cuisine=data["cuisine"],
-            cooking_style=data.get("cooking_style", request.cooking_style)
-        )
+    def _auto_fix_validation_issues(self, data: dict, validation_results: dict, request: RecipeRequest) -> dict:
+        """Attempt to automatically fix validation issues"""
+        
+        fixed_data = data.copy()
+        
+        for issue in validation_results['issues']:
+            # Fix missing fields
+            if "Missing or empty field:" in issue:
+                field = issue.split(": ")[1]
+                if field == "title":
+                    fixed_data["title"] = f"{request.cuisine or 'Delicious'} {request.cooking_style or 'Recipe'}"
+                elif field == "description":
+                    fixed_data["description"] = "A delicious homemade dish"
+                elif field == "cook_time":
+                    fixed_data["cook_time"] = "30 minutes"
+                elif field == "cuisine":
+                    fixed_data["cuisine"] = request.cuisine or "Fusion"
+            
+            # Fix meal type issues
+            if "not appropriate for" in issue and request.meal_type:
+                if request.meal_type.lower() == "breakfast":
+                    # Add "Breakfast" to title if missing
+                    if "title" in fixed_data and "breakfast" not in fixed_data["title"].lower():
+                        fixed_data["title"] = f"Breakfast {fixed_data['title']}"
+            
+            # Fix cooking method issues
+            if "doesn't use" in issue and request.cooking_style:
+                # Update cooking_style field
+                fixed_data["cooking_style"] = request.cooking_style
+                # Add cooking method to title if missing
+                if "title" in fixed_data:
+                    style_words = {
+                        "fried": "Fried", "baked": "Baked", "grilled": "Grilled",
+                        "steamed": "Steamed", "roasted": "Roasted", "sauteed": "Sautéed"
+                    }
+                    if request.cooking_style in style_words:
+                        style_word = style_words[request.cooking_style]
+                        if style_word.lower() not in fixed_data["title"].lower():
+                            fixed_data["title"] = f"{style_word} {fixed_data['title']}"
+        
+        return fixed_data
 
-        # Cache to S3
-        try:
-            self.s3_manager.upload_to_s3(
-                json.dumps(recipe.model_dump(), ensure_ascii=False),
-                folder="generated_recipes"
-            )
-        except Exception as e:
-            print(f"⚠️ S3 upload failed: {e}")
-
-        return recipe
+    def _ingredient_has_variation(self, ingredient: str, text: str) -> bool:
+        """Check if ingredient has a common variation in text"""
+        
+        variations = {
+            "chicken": ["chicken breast", "chicken thighs", "chicken pieces", "chicken wings", "chicken drumsticks"],
+            "beef": ["ground beef", "beef chunks", "steak", "beef strips", "beef roast", "beef stew meat"],
+            "pork": ["pork chops", "ground pork", "pork tenderloin", "bacon", "ham"],
+            "onion": ["onions", "shallot", "shallots", "scallions", "green onions"],
+            "tomato": ["tomatoes", "tomato sauce", "diced tomatoes", "cherry tomatoes", "tomato paste"],
+            "cheese": ["cheddar", "mozzarella", "parmesan", "cheese blend", "feta", "goat cheese"],
+            "pasta": ["spaghetti", "penne", "linguine", "fettuccine", "rigatoni", "macaroni"],
+            "rice": ["white rice", "brown rice", "jasmine rice", "basmati rice", "wild rice"]
+        }
+        
+        for base, vars in variations.items():
+            if base in ingredient:
+                if any(v in text for v in vars):
+                    return True
+        
+        return False
 
     def _apply_light_quantity_fixes(self, data: Dict) -> Dict:
         """Fix only the most obvious quantity mistakes"""
@@ -818,278 +1060,870 @@ class RecipeModel:
                 fixed_ingredients.append(str(line))
                 continue
                 
+            original = line
             lower = line.lower()
             
-            # Fix: "1 bottle" → "1/2 cup"
+            # Fix: "1 bottle" → "1/2 cup" (for wine/vinegar)
             if "bottle" in lower:
-                line = re.sub(r'\d+\s*bottle[s]?\s+', '1/2 cup ', line, flags=re.IGNORECASE)
+                if any(liquid in lower for liquid in ["wine", "vinegar", "sauce"]):
+                    line = re.sub(r'\d+\s*bottle[s]?\s+', '1/2 cup ', line, flags=re.IGNORECASE)
+                else:
+                    line = re.sub(r'\d+\s*bottle[s]?\s+', '2 cups ', line, flags=re.IGNORECASE)
             
-            # Fix: "400ml" → "~1.5 cups" (rough)
-            if "ml" in lower:
-                line = re.sub(r'(\d+)\s*ml', lambda m: f"{int(m.group(1))//240 or 1} cup", line)
+            # Fix: container quantities
+            if "carton" in lower:
+                line = re.sub(r'\d+\s*carton[s]?\s+', '2 cups ', line, flags=re.IGNORECASE)
+            if "package" in lower:
+                line = re.sub(r'\d+\s*package[s]?\s+', '1 lb ', line, flags=re.IGNORECASE)
+            if "bag" in lower:
+                line = re.sub(r'\d+\s*bag[s]?\s+', '12 oz ', line, flags=re.IGNORECASE)
+            if "box" in lower:
+                line = re.sub(r'\d+\s*box(?:es)?\s+', '1 lb ', line, flags=re.IGNORECASE)
             
-            # Fix: "600g" → "~1.3 lb" (rough)
-            if " g " in lower or lower.endswith("g"):
-                line = re.sub(r'(\d+)\s*g\b', lambda m: f"{round(int(m.group(1))*0.0022, 1)} lb", line)
+            # Fix: metric conversions
+            # ml to cups/tbsp (more precise)
+            line = re.sub(r'(\d+)\s*ml\b', 
+                        lambda m: (
+                            f"{round(int(m.group(1))/240, 2)} cup" if int(m.group(1)) >= 240
+                            else f"{round(int(m.group(1))/15, 1)} tbsp" if int(m.group(1)) >= 15
+                            else f"{round(int(m.group(1))/5, 1)} tsp"
+                        ), 
+                        line, flags=re.IGNORECASE)
+            
+            # grams to pounds/ounces (more precise)
+            line = re.sub(r'(\d+)\s*g\b', 
+                        lambda m: (
+                            f"{round(int(m.group(1))*0.00220462, 2)} lb" if int(m.group(1)) >= 450
+                            else f"{round(int(m.group(1))*0.035274, 1)} oz"
+                        ), 
+                        line, flags=re.IGNORECASE)
+            
+            # kg to pounds
+            line = re.sub(r'(\d+(?:\.\d+)?)\s*kg\b', 
+                        lambda m: f"{round(float(m.group(1))*2.20462, 2)} lb", 
+                        line, flags=re.IGNORECASE)
+            
+            # liters to cups
+            line = re.sub(r'(\d+(?:\.\d+)?)\s*l\b', 
+                        lambda m: f"{round(float(m.group(1))*4.227, 1)} cups", 
+                        line, flags=re.IGNORECASE)
+            
+            # Celsius to Fahrenheit (for temperatures in ingredients/instructions)
+            line = re.sub(r'(\d+)\s*°?\s*C\b', 
+                        lambda m: f"{round(int(m.group(1))*9/5 + 32)} °F", 
+                        line, flags=re.IGNORECASE)
+            
+            # Fix excessive quantities for 4 servings
+            # Too much oil (more than 1 cup for non-deep-frying)
+            if "oil" in lower and "deep" not in lower:
+                oil_match = re.search(r'([2-9]|\d{2,})\s*cup', line)
+                if oil_match:
+                    line = re.sub(r'([2-9]|\d{2,})\s*cup', '1/4 cup', line)
+            
+            # Too much salt (more than 2 tbsp is excessive)
+            if "salt" in lower and not "salted" in lower:
+                salt_match = re.search(r'([3-9]|\d{2,})\s*tbsp', line)
+                if salt_match:
+                    line = re.sub(r'([3-9]|\d{2,})\s*tbsp', '2 tsp', line)
+            
+            # Too much alcohol (cap at 1 cup for cooking)
+            if any(alcohol in lower for alcohol in ["wine", "beer", "sake", "sherry", "cognac"]):
+                alcohol_match = re.search(r'([2-9]|\d{2,})\s*cup', line)
+                if alcohol_match:
+                    line = re.sub(r'([2-9]|\d{2,})\s*cup', '1/2 cup', line)
+            
+            # Log changes for debugging
+            if line != original:
+                print(f"   Fixed quantity: '{original}' → '{line}'")
             
             fixed_ingredients.append(line)
         
         data["ingredients"] = fixed_ingredients
+        
+        # Also fix instructions if they contain metric units or containers
+        if "instructions" in data and isinstance(data["instructions"], list):
+            fixed_instructions = []
+            for instruction in data["instructions"]:
+                if not isinstance(instruction, str):
+                    fixed_instructions.append(str(instruction))
+                    continue
+                
+                original_inst = instruction
+                
+                # Fix temperatures in instructions
+                instruction = re.sub(r'(\d+)\s*°?\s*C\b', 
+                                    lambda m: f"{round(int(m.group(1))*9/5 + 32)}°F", 
+                                    instruction, flags=re.IGNORECASE)
+                
+                # Fix metric volumes in instructions
+                instruction = re.sub(r'(\d+)\s*ml\b', 
+                                lambda m: f"{round(int(m.group(1))/240, 2)} cup" if int(m.group(1)) >= 240
+                                else f"{round(int(m.group(1))/15, 1)} tbsp",
+                                instruction, flags=re.IGNORECASE)
+                
+                # Fix container references
+                instruction = re.sub(r'entire bottle', 'the wine', instruction, flags=re.IGNORECASE)
+                instruction = re.sub(r'whole carton', 'the liquid', instruction, flags=re.IGNORECASE)
+                
+                if instruction != original_inst:
+                    print(f"   Fixed instruction: Modified metric/container references")
+                
+                fixed_instructions.append(instruction)
+            
+            data["instructions"] = fixed_instructions
+        
         return data
+   
     
     def _normalize_ingredients(self, data: Dict) -> Dict:
-        """Convert nested arrays or malformed ingredients into proper string format"""
-        
+        """
+        Convert nested arrays or malformed ingredients into a clean list of strings.
+        This is more robust than the previous version.
+        """
         if "ingredients" not in data or not isinstance(data["ingredients"], list):
             return data
-        
+
         normalized = []
-        
-        for item in data["ingredients"]:
-            # Case 1: Already a proper string
-            if isinstance(item, str):
-                normalized.append(item)
-            
-            # Case 2: Nested array like ["1.5 lb", "beef", "cut into strips"]
-            elif isinstance(item, list):
-                # Join with spaces and capitalize first letter of ingredient name
-                parts = [str(p).strip() for p in item if p]
-                if len(parts) >= 2:
-                    # Format: "qty unit Name, notes"
-                    qty_unit = " ".join(parts[:2])
-                    rest = ", ".join(parts[2:]) if len(parts) > 2 else ""
-                    ingredient_name = parts[1] if len(parts) > 1 else parts[0]
-                    
-                    # Capitalize ingredient name (skip if it's a unit like 'tbsp')
-                    units = ['tsp', 'tbsp', 'cup', 'oz', 'lb', 'g', 'ml', 'kg']
-                    if ingredient_name.lower() not in units:
-                        ingredient_name = ingredient_name.capitalize()
-                    
-                    if rest:
-                        normalized.append(f"{parts[0]} {ingredient_name}, {rest}")
-                    else:
-                        normalized.append(f"{parts[0]} {ingredient_name}")
-                else:
-                    # Fallback: just join everything
-                    normalized.append(" ".join(parts))
-            
-            # Case 3: Something else (dict, number, etc.) - convert to string
-            else:
-                normalized.append(str(item))
-        
+        for item in data.get("ingredients", []):
+            try:
+                # Case 1: Already a proper string
+                if isinstance(item, str) and item.strip():
+                    normalized.append(item.strip())
+                
+                # Case 2: Nested list like ["1 lb", "Beef", "(cut into strips)"]
+                elif isinstance(item, list):
+                    parts = [str(p).strip() for p in item if p is not None and str(p).strip()]
+                    if parts:
+                        normalized.append(" ".join(parts))
+                
+                # Case 3: Other data types (numbers, dicts)
+                elif item is not None:
+                    normalized.append(str(item))
+            except Exception as e:
+                print(f"⚠️  Could not normalize ingredient item '{item}': {e}")
+                continue # Skip malformed items
+
         data["ingredients"] = normalized
         return data
-    
-    def _validate_meal_type_appropriateness(self, data: Dict, request: RecipeRequest) -> bool:
-        """Check if generated recipe is appropriate for requested meal type"""
+
+    def _ensure_ingredient_instruction_consistency(self, data: dict) -> dict:
+        """
+        Soft check to ensure all ingredients are used in instructions and vice versa.
+        Logs warnings for potential inconsistencies.
+        """
+        if not data.get("ingredients") or not data.get("instructions"):
+            return data
+
+        # Extract normalized ingredient names
+        ingredient_names = []
+        for ing in data["ingredients"]:
+            # Simple extraction: take the first non-numeric, non-unit word as the core ingredient
+            parts = re.split(r'[\s,()]', ing)
+            for part in parts:
+                if part and not re.match(r'^\d', part) and part.lower() not in ['tsp', 'tbsp', 'cup', 'oz', 'lb']:
+                    ingredient_names.append(part.lower())
+                    break
         
-        if not request.meal_type:
-            return True  # No meal type specified, so anything goes
+        instructions_text = " ".join(data.get("instructions", [])).lower()
         
-        meal_lower = request.meal_type.lower()
-        title_lower = data.get("title", "").lower()
-        desc_lower = data.get("description", "").lower()
+        # Check if listed ingredients are mentioned in instructions
+        unused_ingredients = [
+            ing_name for ing_name in ingredient_names 
+            if ing_name not in instructions_text and not self._ingredient_has_variation(ing_name, instructions_text)
+        ]
+
+        if unused_ingredients:
+            print(f"⚠️  Consistency Warning: Ingredients may not be used in instructions: {', '.join(unused_ingredients)}")
+
+        return data
         
-        # Breakfast red flags
-        if meal_lower == "breakfast":
-            breakfast_violations = ["burger", "cheeseburger", "pizza", "spaghetti", "lasagna"]
-            for violation in breakfast_violations:
-                if violation in title_lower:
-                    print(f"⚠️ Meal type violation: '{violation}' in title for breakfast")
-                    return False
-        
-        # Dinner served as breakfast
-        if meal_lower == "breakfast":
-            if any(word in title_lower for word in ["roast", "braised", "grilled chicken dinner"]):
-                if "breakfast" not in title_lower and "egg" not in title_lower:
-                    print(f"⚠️ Dinner-style dish proposed for breakfast")
-                    return False
-        
-        return True
+    def _validate_and_fix_servings(self, data: dict) -> dict:
+        """Ensure the 'servings' field is a valid integer, defaulting to 4."""
+        try:
+            servings = int(data.get("servings", 4))
+            if not (1 <= servings <= 16):
+                servings = 4 # Reset unreasonable values
+            data["servings"] = servings
+        except (ValueError, TypeError):
+            data["servings"] = 4
+        return data
+
+    # ===================================================================
+    # Main Public Method
+    # ===================================================================
 
     def get_or_generate_recipe(self, request: RecipeRequest) -> RecipeResponse:
         """
-        First search S3 for matching recipes, if not found or match is too low, generate a new one
+        First, search S3 for a matching recipe. If the match score is too low
+        or no match is found, generate a new one with robust validation.
         """
         search_result = self.search_s3_recipes(request)
 
         if search_result:
             recipe, match_score = search_result
-
-            # Check if match score is good enough (51% or higher)
             if match_score >= 0.51:
-                print(
-                    f"✨ Returning existing recipe from S3: {recipe.title} (match: {match_score*100:.1f}%)")
+                print(f"✨ Returning existing recipe from S3: {recipe.title} (match: {match_score*100:.1f}%)")
                 return RecipeResponse(
                     recipe=recipe,
                     source="s3",
                     match_score=match_score
                 )
             else:
-                print(
-                    f"⚠️ Match score too low ({match_score*100:.1f}%), generating new recipe instead")
+                print(f"⚠️  Match score too low ({match_score*100:.1f}%), generating new recipe.")
 
-        print("🤖 Generating new recipe with AI")
-        recipe = self.generate_new_recipe(request)
-        return RecipeResponse(
-            recipe=recipe,
-            source="generated",
-            match_score=None
-        )
-
+        print("🤖 Generating new recipe with AI...")
+        try:
+            # The generate_new_recipe method now contains all the new logic
+            recipe = self.generate_new_recipe(request)
+            return RecipeResponse(
+                recipe=recipe,
+                source="generated",
+                match_score=None
+            )
+        except Exception as e:
+            print(f"❌ Critical error during recipe generation: {e}")
+            # Depending on your application's needs, you might return a default
+            # error response or re-raise the exception.
+            raise e
 
 class ChefPersonaBuilder:
     """Builds appropriate chef persona based on request"""
 
     CUISINE_EXPERTS: Dict[str, Dict[str, Any]] = {
         "italian": {
-            "name": "Chef Marco",
-            "background": "20 years in Tuscany, trained in traditional Italian cooking",
-            "staples": ["olive oil", "garlic", "tomatoes", "parmesan", "basil", "oregano", "pasta", "balsamic vinegar"],
-            "typical_fats": "olive oil",
-            "avoid": ["soy sauce", "fish sauce", "miso", "gochujang"]
+            "name": "Chef Marco Antonelli",
+            "background": "20 years in Tuscany, trained under Michelin-starred chefs in traditional Italian cooking",
+            "philosophy": "Fresh ingredients, simple preparations, let flavors shine",
+            "staples": ["olive oil", "garlic", "tomatoes", "parmesan", "basil", "oregano", "pasta", "balsamic vinegar", "white wine", "mozzarella"],
+            "typical_fats": "Extra Virgin Olive Oil",
+            "avoid": ["soy sauce", "fish sauce", "miso", "gochujang", "sesame oil", "curry powder"],
+            "signature_techniques": ["slow-simmering sauces", "fresh pasta", "risotto stirring"]
         },
         "chinese": {
-            "name": "Chef Wei",
-            "background": "Szechuan and Cantonese master from Chengdu",
-            "staples": ["soy sauce", "rice vinegar", "ginger", "garlic", "scallions", "sesame oil", "shaoxing wine", "oyster sauce", "white pepper"],
-            "typical_fats": "vegetable oil or peanut oil",
-            "avoid": ["butter", "cream", "olive oil", "parmesan"]
+            "name": "Chef Wei Chen",
+            "background": "Szechuan and Cantonese master from Chengdu with 25 years experience",
+            "philosophy": "Balance of flavors, wok hei is essential",
+            "staples": ["soy sauce", "rice vinegar", "ginger", "garlic", "scallions", "sesame oil", "shaoxing wine", "oyster sauce", "white pepper", "cornstarch"],
+            "typical_fats": "Peanut Oil or Vegetable Oil",
+            "avoid": ["butter", "cream", "cheese", "olive oil", "parmesan", "balsamic vinegar"],
+            "signature_techniques": ["high-heat wok cooking", "velveting", "stir-frying"]
         },
         "mexican": {
-            "name": "Chef Rosa",
-            "background": "Oaxaca family recipes, expert in mole and traditional techniques",
-            "staples": ["cumin", "chili powder", "cilantro", "lime", "garlic", "tomatoes", "onions", "jalapeños", "coriander", "oregano"],
-            "typical_fats": "vegetable oil, lard, or avocado oil",
-            "avoid": ["soy sauce", "mirin", "fish sauce", "curry powder"]
+            "name": "Chef Rosa Martinez",
+            "background": "Oaxaca family recipes passed down 3 generations, expert in mole and traditional techniques",
+            "philosophy": "Build layers of flavor with chiles and spices",
+            "staples": ["cumin", "chili powder", "cilantro", "lime", "garlic", "tomatoes", "onions", "jalapeños", "coriander", "mexican oregano", "corn tortillas"],
+            "typical_fats": "Vegetable Oil, Lard, or Avocado Oil",
+            "avoid": ["soy sauce", "mirin", "fish sauce", "curry powder", "sesame oil"],
+            "signature_techniques": ["toasting spices", "charring peppers", "slow-braising"]
         },
         "indian": {
-            "name": "Chef Anjali",
-            "background": "Kerala spice expert with North and South Indian expertise",
-            "staples": ["cumin", "coriander", "turmeric", "garam masala", "ginger", "garlic", "ghee", "cardamom", "curry leaves", "yogurt"],
-            "typical_fats": "ghee or vegetable oil",
-            "avoid": ["soy sauce", "mirin", "fish sauce"]
+            "name": "Chef Anjali Sharma",
+            "background": "Kerala spice expert with North and South Indian mastery, trained in Mumbai",
+            "philosophy": "Spices are medicine, balance is key",
+            "staples": ["cumin", "coriander", "turmeric", "garam masala", "ginger", "garlic", "ghee", "cardamom", "curry leaves", "yogurt", "basmati rice"],
+            "typical_fats": "Ghee or Vegetable Oil",
+            "avoid": ["soy sauce", "mirin", "fish sauce", "olive oil", "parmesan"],
+            "signature_techniques": ["tempering spices", "tandoor cooking", "dum cooking"]
         },
         "japanese": {
-            "name": "Chef Takashi",
-            "background": "Kyoto-trained kaiseki specialist with 15 years experience",
-            "staples": ["soy sauce", "mirin", "sake", "dashi", "ginger", "rice vinegar", "sesame oil", "miso", "nori", "wasabi"],
-            "typical_fats": "sesame oil or vegetable oil",
-            "avoid": ["heavy cream", "butter", "olive oil", "wine"]
+            "name": "Chef Takashi Yamamoto",
+            "background": "Kyoto-trained kaiseki specialist with 15 years perfecting umami balance",
+            "philosophy": "Respect ingredients, highlight natural flavors",
+            "staples": ["soy sauce", "mirin", "sake", "dashi", "ginger", "rice vinegar", "sesame oil", "miso", "nori", "wasabi", "bonito flakes"],
+            "typical_fats": "Sesame Oil or Neutral Vegetable Oil",
+            "avoid": ["heavy cream", "butter", "cheese", "olive oil", "wine", "tomato sauce"],
+            "signature_techniques": ["precise knife cuts", "tempura battering", "sushi rice preparation"]
         },
         "thai": {
-            "name": "Chef Somchai",
-            "background": "Bangkok street food master specializing in balance of flavors",
-            "staples": ["fish sauce", "lime juice", "palm sugar", "thai basil", "lemongrass", "galangal", "thai chilies", "cilantro", "coconut milk"],
-            "typical_fats": "vegetable oil or coconut oil",
-            "avoid": ["soy sauce", "butter", "heavy cream"]
+            "name": "Chef Somchai Prasert",
+            "background": "Bangkok street food master, expert in balancing sweet-sour-salty-spicy",
+            "philosophy": "Every dish needs all four flavors in harmony",
+            "staples": ["fish sauce", "lime juice", "palm sugar", "thai basil", "lemongrass", "galangal", "thai chilies", "cilantro", "coconut milk", "tamarind"],
+            "typical_fats": "Vegetable Oil or Coconut Oil",
+            "avoid": ["soy sauce", "butter", "heavy cream", "cheese", "olive oil"],
+            "signature_techniques": ["mortar and pestle grinding", "high-heat stir-frying", "coconut milk tempering"]
         },
         "french": {
-            "name": "Chef Dubois",
-            "background": "Trained at Le Cordon Bleu, classically educated in French technique",
-            "staples": ["butter", "cream", "white wine", "shallots", "thyme", "tarragon", "dijon mustard", "garlic", "bay leaf"],
-            "typical_fats": "butter or olive oil",
-            "avoid": ["fish sauce", "soy sauce", "mirin", "gochujang"]
+            "name": "Chef Antoine Dubois",
+            "background": "Le Cordon Bleu Paris graduate, classically trained in haute cuisine",
+            "philosophy": "Technique is everything, butter makes it better",
+            "staples": ["butter", "cream", "white wine", "shallots", "thyme", "tarragon", "dijon mustard", "garlic", "bay leaf", "cognac"],
+            "typical_fats": "Butter or Olive Oil",
+            "avoid": ["fish sauce", "soy sauce", "mirin", "gochujang", "sesame oil"],
+            "signature_techniques": ["classical sauces", "proper emulsification", "braising"]
         },
         "mediterranean": {
-            "name": "Chef Dimitris",
-            "background": "Coastal Mediterranean specialist from Greece and Southern Italy",
+            "name": "Chef Dimitris Papadopoulos",
+            "background": "Coastal Mediterranean specialist from Greek islands and Southern Italy",
+            "philosophy": "Sun, sea, and simplicity",
             "staples": ["olive oil", "lemon", "garlic", "oregano", "basil", "tomatoes", "olives", "feta cheese", "capers", "parsley"],
-            "typical_fats": "olive oil",
-            "avoid": ["soy sauce", "fish sauce", "heavy cream", "butter"]
+            "typical_fats": "Extra Virgin Olive Oil",
+            "avoid": ["soy sauce", "fish sauce", "heavy cream", "butter", "sesame oil"],
+            "signature_techniques": ["grilling over coals", "preserving in oil", "slow-roasting"]
         },
         "american": {
-            "name": "Chef Jake",
-            "background": "Modern American cuisine with Southern and BBQ influences",
-            "staples": ["butter", "garlic powder", "onion powder", "paprika", "black pepper", "worcestershire sauce", "mustard", "brown sugar", "hot sauce"],
-            "typical_fats": "butter, vegetable oil, or bacon fat",
-            "avoid": ["fish sauce", "mirin"]
+            "name": "Chef Jake Thompson",
+            "background": "Modern American cuisine with Southern BBQ and comfort food expertise",
+            "philosophy": "Bold flavors, generous portions, comfort first",
+            "staples": ["butter", "garlic powder", "onion powder", "paprika", "black pepper", "worcestershire sauce", "mustard", "brown sugar", "hot sauce", "bacon"],
+            "typical_fats": "Butter, Vegetable Oil, or Bacon Fat",
+            "avoid": ["fish sauce", "mirin", "gochujang"],
+            "signature_techniques": ["low and slow BBQ", "cast-iron cooking", "deep-frying"]
         },
         "korean": {
-            "name": "Chef Min-ju",
-            "background": "Seoul-trained in traditional and modern Korean cooking",
-            "staples": ["gochujang", "gochugaru", "soy sauce", "sesame oil", "garlic", "ginger", "scallions", "doenjang", "rice vinegar", "perilla oil"],
-            "typical_fats": "sesame oil or vegetable oil",
-            "avoid": ["butter", "cream", "olive oil", "fish sauce"]
-        },
-        "greek": {
-            "name": "Chef Yiannis",
-            "background": "Athens-trained in traditional Greek taverna cooking",
-            "staples": ["olive oil", "lemon", "oregano", "garlic", "feta cheese", "olives", "tomatoes", "dill", "mint", "yogurt"],
-            "typical_fats": "olive oil",
-            "avoid": ["soy sauce", "fish sauce", "butter", "heavy cream"]
+            "name": "Chef Min-ju Park",
+            "background": "Seoul-trained in royal court cuisine and modern Korean fusion",
+            "philosophy": "Fermentation creates depth, balance sweet and spicy",
+            "staples": ["gochujang", "gochugaru", "soy sauce", "sesame oil", "garlic", "ginger", "scallions", "doenjang", "rice vinegar", "perilla leaves"],
+            "typical_fats": "Sesame Oil or Vegetable Oil",
+            "avoid": ["butter", "cream", "cheese", "olive oil", "fish sauce"],
+            "signature_techniques": ["fermentation", "banchan preparation", "Korean BBQ grilling"]
         },
         "spanish": {
-            "name": "Chef Carmen",
-            "background": "Barcelona-trained in tapas and paella traditions",
-            "staples": ["olive oil", "garlic", "paprika", "saffron", "tomatoes", "parsley", "almonds", "sherry vinegar", "chorizo", "manchego cheese"],
-            "typical_fats": "olive oil",
-            "avoid": ["soy sauce", "fish sauce", "butter", "asian spices"]
+            "name": "Chef Carmen Rodriguez",
+            "background": "Barcelona-trained in traditional tapas and paella mastery",
+            "philosophy": "Share food, share life",
+            "staples": ["olive oil", "garlic", "smoked paprika", "saffron", "tomatoes", "parsley", "almonds", "sherry vinegar", "chorizo", "manchego"],
+            "typical_fats": "Spanish Olive Oil",
+            "avoid": ["soy sauce", "fish sauce", "butter", "sesame oil", "curry powder"],
+            "signature_techniques": ["paella socarrat", "tapas plating", "jamón carving"]
+        },
+        "middle eastern": {
+            "name": "Chef Khalil Hassan",
+            "background": "Lebanese-Syrian cuisine expert with Persian influences",
+            "philosophy": "Hospitality through abundance",
+            "staples": ["olive oil", "tahini", "sumac", "za'atar", "pomegranate molasses", "yogurt", "mint", "parsley", "cumin", "cinnamon"],
+            "typical_fats": "Olive Oil or Ghee",
+            "avoid": ["soy sauce", "fish sauce", "miso", "gochujang"],
+            "signature_techniques": ["spice blending", "mezze preparation", "flatbread baking"]
         }
     }
 
+    # Common cuisine aliases mapping
+    CUISINE_ALIASES = {
+        "asian": "chinese",
+        "tex-mex": "mexican", 
+        "tex mex": "mexican",
+        "southwestern": "mexican",
+        "cajun": "american",
+        "southern": "american",
+        "bbq": "american",
+        "barbecue": "american",
+        "levantine": "mediterranean",
+        "middle eastern": "mediterranean",
+        "arabic": "mediterranean",
+        "greek": "greek",
+        "hellenic": "greek"
+    }
+    
+    
     @staticmethod
     def build_persona(cuisine: Optional[str]) -> Dict[str, Any]:
-        """Return the matching persona dict or a generalist if none specified."""
+        """
+        Return the matching chef persona or a generalist if none specified.
+        
+        Args:
+            cuisine: The requested cuisine type (optional)
+            
+        Returns:
+            Dict containing chef persona with name, background, staples, etc.
+        """
+        # Default generalist chef
         if not cuisine:
             return {
-                "name": "Chef Alex",
-                "background": "Culinary Institute graduate with global fusion experience",
-                "approach": "I adapt any ingredient to create balanced, delicious dishes",
-                "staples": ["salt", "pepper", "garlic", "onions", "olive oil", "butter", "herbs", "spices"],
-                "typical_fats": "olive oil or butter",
-                "avoid": []
+                "name": "Chef Alexandre Martin",
+                "background": "Culinary Institute graduate with 20 years global fusion experience",
+                "philosophy": "Every ingredient has potential, technique unlocks it",
+                "staples": ["salt", "pepper", "garlic", "onions", "olive oil", "butter", "herbs", "spices", "lemon", "vinegar"],
+                "typical_fats": "Olive Oil or Butter",
+                "avoid": [],
+                "signature_techniques": ["adapting to available ingredients", "fusion creativity"]
             }
 
-        key = cuisine.lower().strip()
-        return ChefPersonaBuilder.CUISINE_EXPERTS.get(key, {
-            "name": "Chef Alex",
+        # Normalize cuisine name
+        normalized_cuisine = cuisine.lower().strip()
+        
+        # Check aliases first
+        if normalized_cuisine in ChefPersonaBuilder.CUISINE_ALIASES:
+            normalized_cuisine = ChefPersonaBuilder.CUISINE_ALIASES[normalized_cuisine]
+        
+        # Return specific expert if found
+        if normalized_cuisine in ChefPersonaBuilder.CUISINE_EXPERTS:
+            return ChefPersonaBuilder.CUISINE_EXPERTS[normalized_cuisine]
+        
+        # Create a generic specialist for unknown cuisines
+        return {
+            "name": f"Chef Alexandre (specialized in {cuisine.title()})",
             "background": f"{cuisine.title()} cuisine specialist with international training",
-            "approach": f"I create authentic {cuisine.title()} dishes while respecting ingredient availability",
-            "staples": ["salt", "pepper", "garlic", "onions", "oil", "herbs", "spices"],
-            "typical_fats": "oil or butter",
-            "avoid": []
-        })
+            "philosophy": f"Authentic {cuisine.title()} flavors with modern techniques",
+            "staples": ["salt", "pepper", "garlic", "onions", "oil", "herbs", "spices", "vinegar", "lemon"],
+            "typical_fats": "appropriate cooking fat for the cuisine",
+            "avoid": [],
+            "signature_techniques": [f"{cuisine.lower()} traditional methods", "regional adaptations"]
+        }
 
+    @staticmethod
+    def get_all_cuisines() -> List[str]:
+        """Return list of all supported cuisines"""
+        return list(ChefPersonaBuilder.CUISINE_EXPERTS.keys())
 
 class IngredientAnalyzer:
-    """Analyzes user ingredients for cuisine conflicts"""
+    """Analyzes user ingredients for cuisine conflicts and provides recommendations"""
+
+    # Common ingredient substitutions by cuisine
+    SUBSTITUTIONS = {
+        "japanese": {
+            "white wine": "sake or mirin",
+            "butter": "sesame oil",
+            "olive oil": "vegetable oil",
+            "heavy cream": "silken tofu or soy milk",
+            "cheese": "tofu or omit",
+            "milk": "soy milk or dashi"
+        },
+        "chinese": {
+            "butter": "vegetable oil or peanut oil",
+            "olive oil": "peanut oil or vegetable oil",
+            "wine": "shaoxing wine or dry sherry",
+            "parmesan": "omit or use tofu",
+            "cream": "coconut milk or cornstarch slurry",
+            "cheese": "tofu or omit"
+        },
+        "mexican": {
+            "soy sauce": "worcestershire sauce or lime juice",
+            "fish sauce": "worcestershire sauce",
+            "sesame oil": "vegetable oil",
+            "mirin": "honey and lime juice",
+            "gochujang": "chipotle in adobo"
+        },
+        "italian": {
+            "soy sauce": "worcestershire sauce or anchovies",
+            "fish sauce": "anchovies or capers",
+            "sesame oil": "olive oil",
+            "mirin": "white wine with sugar",
+            "gochujang": "calabrian chili paste"
+        },
+        "indian": {
+            "soy sauce": "tamarind or worcestershire",
+            "olive oil": "ghee or vegetable oil",
+            "butter": "ghee",
+            "wine": "vinegar or lemon juice",
+            "fish sauce": "tamarind or amchur"
+        },
+        "thai": {
+            "soy sauce": "fish sauce or tamari",
+            "butter": "coconut oil",
+            "olive oil": "vegetable oil",
+            "cheese": "tofu or omit",
+            "cream": "coconut milk"
+        },
+        "french": {
+            "soy sauce": "worcestershire or beef stock reduction",
+            "fish sauce": "anchovies",
+            "sesame oil": "walnut oil or olive oil",
+            "gochujang": "harissa or tomato paste with cayenne",
+            "miso": "concentrated beef or mushroom stock"
+        },
+        "mediterranean": {
+            "soy sauce": "worcestershire or balsamic reduction",
+            "butter": "olive oil",
+            "cream": "yogurt or olive oil",
+            "fish sauce": "anchovies or capers",
+            "sesame oil": "olive oil"
+        },
+        "korean": {
+            "olive oil": "sesame oil or vegetable oil",
+            "butter": "sesame oil",
+            "cream": "soy milk or omit",
+            "fish sauce": "soy sauce or salted shrimp",
+            "wine": "soju or rice wine"
+        }
+    }
+
+    # Ingredient categories for conflict detection
+    INGREDIENT_CATEGORIES = {
+        "asian_condiments": [
+            "soy sauce", "miso", "mirin", "sake", "fish sauce", 
+            "oyster sauce", "hoisin sauce", "gochujang", "gochugaru",
+            "doenjang", "sambal", "sriracha", "sesame oil"
+        ],
+        "western_dairy": [
+            "butter", "cream", "heavy cream", "milk", "cheese",
+            "parmesan", "mozzarella", "cheddar", "sour cream",
+            "cream cheese", "yogurt", "buttermilk"
+        ],
+        "mediterranean": [
+            "olive oil", "olives", "capers", "sun-dried tomatoes",
+            "feta", "balsamic vinegar", "anchovies"
+        ],
+        "latin_american": [
+            "cilantro", "lime", "jalapeño", "chipotle", "adobo",
+            "queso fresco", "cotija", "mexican crema", "tomatillo"
+        ],
+        "indian_spices": [
+            "garam masala", "turmeric", "cardamom", "curry powder",
+            "curry leaves", "mustard seeds", "ghee", "paneer"
+        ],
+        "french_classic": [
+            "wine", "cognac", "brandy", "dijon mustard", "tarragon",
+            "herbes de provence", "gruyere", "brie"
+        ]
+    }
 
     @staticmethod
     def detect_conflicts(user_ingredients: List[str], cuisine: Optional[str]) -> Dict:
-        """Detect if user ingredients conflict with requested cuisine"""
+        """
+        Detect if user ingredients conflict with requested cuisine.
+        
+        Args:
+            user_ingredients: List of ingredients provided by user
+            cuisine: The requested cuisine type
+            
+        Returns:
+            Dict containing conflict analysis and recommendations
+        """
+        # No cuisine specified = no conflicts
         if not cuisine:
             return {
                 "has_conflict": False,
                 "conflicts": [],
-                "staples": ["salt", "pepper", "garlic", "onions", "oil"],
-                "typical_fats": "oil or butter"
+                "staples": ["salt", "pepper", "garlic", "onions", "oil", "vinegar", "herbs"],
+                "typical_fats": "oil or butter",
+                "suggestions": []
             }
 
+        # Get the chef persona for this cuisine
         persona = ChefPersonaBuilder.build_persona(cuisine)
-
-        # avoid is already a list, not a string
+        
+        # Get avoid list from persona
         avoid_list = persona.get("avoid", [])
-
+        staples = persona.get("staples", [])
+        typical_fats = persona.get("typical_fats", "oil")
+        
         conflicts = []
-        for ing in user_ingredients:
-            ing_lower = ing.lower()
+        suggestions = []
+        
+        # Check each user ingredient for conflicts
+        for ingredient in user_ingredients:
+            ing_lower = ingredient.lower().strip()
+            
+            # Check against avoid list
             for avoid_item in avoid_list:
                 avoid_lower = avoid_item.lower()
-                if avoid_lower in ing_lower:
+                
+                # Check for exact match or substring
+                if (avoid_lower in ing_lower or 
+                    ing_lower in avoid_lower or
+                    IngredientAnalyzer._similar_ingredient(ing_lower, avoid_lower)):
+                    
+                    # Find substitution if available
+                    substitution = IngredientAnalyzer._get_substitution(
+                        avoid_item, cuisine
+                    )
+                    
                     conflicts.append({
-                        "ingredient": ing,
+                        "ingredient": ingredient,
                         "issue": avoid_item,
-                        "suggestion": f"atypical for {cuisine}"
+                        "suggestion": f"atypical for {cuisine} cuisine",
+                        "substitution": substitution
                     })
+                    
+                    if substitution:
+                        suggestions.append(
+                            f"Consider replacing {ingredient} with {substitution}"
+                        )
+                    break
 
+        # Analyze ingredient categories for better recommendations
+        category_analysis = IngredientAnalyzer._analyze_categories(
+            user_ingredients, cuisine
+        )
+        
         return {
             "has_conflict": len(conflicts) > 0,
             "conflicts": conflicts,
-            "staples": persona.get("staples", []),
-            "typical_fats": persona.get("typical_fats", "oil")
+            "staples": staples,
+            "typical_fats": typical_fats,
+            "suggestions": suggestions,
+            "category_notes": category_analysis
         }
+    
+    @staticmethod
+    def _similar_ingredient(ing1: str, ing2: str) -> bool:
+        """
+        Check if two ingredients are similar (handles variations).
+        
+        Args:
+            ing1: First ingredient
+            ing2: Second ingredient
+            
+        Returns:
+            True if ingredients are similar
+        """
+        # Common variations to check
+        variations = [
+            ("soy sauce", "soya sauce", "shoyu"),
+            ("sesame oil", "sesame seed oil"),
+            ("olive oil", "evoo", "extra virgin olive oil"),
+            ("butter", "unsalted butter", "salted butter"),
+            ("cream", "heavy cream", "whipping cream", "double cream"),
+            ("wine", "white wine", "red wine", "cooking wine")
+        ]
+        
+        for group in variations:
+            if ing1 in group and ing2 in group:
+                return True
+                
+        return False
+    
+    @staticmethod
+    def _get_substitution(ingredient: str, cuisine: str) -> Optional[str]:
+        """
+        Get substitution for an ingredient in a specific cuisine.
+        
+        Args:
+            ingredient: The conflicting ingredient
+            cuisine: The target cuisine
+            
+        Returns:
+            Suggested substitution or None
+        """
+        cuisine_lower = cuisine.lower()
+        ingredient_lower = ingredient.lower()
+        
+        if cuisine_lower in IngredientAnalyzer.SUBSTITUTIONS:
+            subs = IngredientAnalyzer.SUBSTITUTIONS[cuisine_lower]
+            
+            # Check for exact match
+            if ingredient_lower in subs:
+                return subs[ingredient_lower]
+            
+            # Check for partial matches
+            for key, value in subs.items():
+                if key in ingredient_lower or ingredient_lower in key:
+                    return value
+                    
+        return None
+    
+    @staticmethod
+    def _analyze_categories(ingredients: List[str], cuisine: str) -> List[str]:
+        """
+        Analyze ingredient categories for cuisine compatibility.
+        
+        Args:
+            ingredients: List of user ingredients
+            cuisine: Target cuisine
+            
+        Returns:
+            List of category-based notes
+        """
+        notes = []
+        ingredient_lower = [i.lower() for i in ingredients]
+        
+        # Count ingredients by category
+        category_counts = {}
+        for category, items in IngredientAnalyzer.INGREDIENT_CATEGORIES.items():
+            count = sum(1 for ing in ingredient_lower 
+                       if any(item in ing for item in items))
+            if count > 0:
+                category_counts[category] = count
+        
+        # Generate notes based on category analysis
+        cuisine_lower = cuisine.lower() if cuisine else ""
+        
+        if "asian" not in cuisine_lower and "chinese" not in cuisine_lower and "japanese" not in cuisine_lower:
+            if category_counts.get("asian_condiments", 0) >= 2:
+                notes.append("Multiple Asian condiments detected - consider fusion approach")
+        
+        if "french" in cuisine_lower or "italian" in cuisine_lower:
+            if category_counts.get("asian_condiments", 0) > 0:
+                notes.append("Mix of European and Asian ingredients - creative fusion opportunity")
+        
+        if cuisine_lower in ["japanese", "chinese", "thai", "korean"]:
+            if category_counts.get("western_dairy", 0) >= 2:
+                notes.append("Multiple dairy products uncommon in Asian cuisine - use sparingly")
+        
+        return notes
+    
+    @staticmethod
+    def enhance_ingredients(base_ingredients: List[str], cuisine: str) -> List[str]:
+        """
+        Suggest additional ingredients to enhance the dish based on cuisine.
+        
+        Args:
+            base_ingredients: User's provided ingredients
+            cuisine: Target cuisine
+            
+        Returns:
+            List of suggested additional ingredients
+        """
+        persona = ChefPersonaBuilder.build_persona(cuisine)
+        staples = persona.get("staples", [])
+        
+        # Find missing essential staples
+        base_lower = [i.lower() for i in base_ingredients]
+        suggestions = []
+        
+        # Essential ingredients by cuisine
+        essentials = {
+            "italian": ["garlic", "olive oil", "parmesan"],
+            "chinese": ["soy sauce", "ginger", "garlic"],
+            "japanese": ["soy sauce", "mirin", "rice vinegar"],
+            "mexican": ["lime", "cilantro", "onion"],
+            "indian": ["ginger", "garlic", "cumin"],
+            "thai": ["fish sauce", "lime", "cilantro"],
+            "french": ["butter", "shallot", "wine"]
+        }
+        
+        cuisine_lower = cuisine.lower() if cuisine else ""
+        if cuisine_lower in essentials:
+            for essential in essentials[cuisine_lower]:
+                if not any(essential in ing for ing in base_lower):
+                    suggestions.append(essential)
+        
+        return suggestions[:5]  # Return top 5 suggestions
 
+
+class RecipePromptBuilder:
+    """Builds complete, structured prompts for recipe generation"""
+    
+    @staticmethod
+    def build_complete_prompt(
+        user_request: str,
+        user_ingredients: Optional[List[str]] = None,
+        cuisine: Optional[str] = None,
+        dietary_restrictions: Optional[List[str]] = None
+    ) -> str:
+        """
+        Builds a complete prompt with persona, constraints, and clear JSON requirements.
+        
+        Args:
+            user_request: The user's recipe request
+            user_ingredients: Optional list of available ingredients
+            cuisine: Optional cuisine type
+            dietary_restrictions: Optional list of restrictions
+            
+        Returns:
+            Complete formatted prompt string
+        """
+        # Get chef persona
+        persona = ChefPersonaBuilder.build_persona(cuisine)
+        
+        # Analyze ingredients for conflicts if provided
+        ingredient_analysis = None
+        if user_ingredients and cuisine:
+            ingredient_analysis = IngredientAnalyzer.detect_conflicts(
+                user_ingredients, cuisine
+            )
+        
+        # Build the prompt sections
+        sections = []
+        
+        # 1. System context (who the chef is)
+        sections.append(f"""You are {persona['name']}, {persona['background']}.
+Your culinary philosophy: {persona['philosophy']}
+
+""")
+        
+        # 2. Cuisine-specific constraints
+        if cuisine:
+            sections.append(f"""CUISINE REQUIREMENTS FOR {cuisine.upper()}:
+- Typical cooking fats: {persona['typical_fats']}
+- Essential staple ingredients: {', '.join(persona['staples'][:8])}
+- Signature techniques: {', '.join(persona['signature_techniques'])}
+- AVOID using: {', '.join(persona['avoid']) if persona['avoid'] else 'N/A'}
+
+""")
+        
+        # 3. Ingredient constraints
+        if user_ingredients:
+            sections.append(f"""AVAILABLE INGREDIENTS:
+{chr(10).join(f'- {ing}' for ing in user_ingredients)}
+
+You MUST incorporate these ingredients into the recipe where appropriate.
+""")
+            
+            # Add conflict warnings
+            if ingredient_analysis and ingredient_analysis['has_conflict']:
+                sections.append(f"""
+⚠️ INGREDIENT NOTES:
+{chr(10).join(f'- {conf["ingredient"]}: {conf["suggestion"]}' for conf in ingredient_analysis['conflicts'])}
+
+Suggestions: {chr(10).join(f'- {s}' for s in ingredient_analysis['suggestions'])}
+""")
+        
+        # 4. Dietary restrictions
+        if dietary_restrictions:
+            sections.append(f"""DIETARY RESTRICTIONS:
+{chr(10).join(f'- {restriction}' for restriction in dietary_restrictions)}
+
+Ensure the recipe complies with ALL restrictions.
+""")
+        
+        # 5. The actual request
+        sections.append(f"""USER REQUEST:
+"{user_request}"
+
+""")
+        
+        # 6. Clear JSON output instruction
+        sections.append("""YOUR RESPONSE:
+Return ONLY the JSON object below with NO additional text, markdown, or formatting.
+
+START YOUR RESPONSE WITH: {
+END YOUR RESPONSE WITH: }
+
+Required JSON structure:
+{
+  "chef_notes": "Brief insight about this dish",
+  "title": "Recipe Name",
+  "description": "Brief description (1-2 sentences)",
+  "ingredients": [
+    "2 tbsp Ingredient Name",
+    "1 lb Another Ingredient (preparation note)"
+  ],
+  "instructions": [
+    "Step 1 description",
+    "Step 2 description"
+  ],
+  "cook_time": "XX minutes",
+  "cuisine": "Cuisine Type",
+  "cooking_style": "Cooking Method",
+  "servings": 4
+}
+
+Begin your JSON response now:""")
+        
+        return ''.join(sections)
+    
+    @staticmethod
+    def build_simple_prompt(user_request: str) -> str:
+        """
+        Builds a simple prompt for quick recipe generation without constraints.
+        
+        Args:
+            user_request: The user's recipe request
+            
+        Returns:
+            Simple formatted prompt string
+        """
+        return f"""Create a recipe for: "{user_request}"
+
+Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+
+{{
+  "chef_notes": "Your insight about this dish",
+  "title": "Recipe Name",
+  "description": "Brief description",
+  "ingredients": ["ingredient 1", "ingredient 2"],
+  "instructions": ["step 1", "step 2"],
+  "cook_time": "XX minutes",
+  "cuisine": "Cuisine Type",
+  "cooking_style": "Cooking Method",
+  "servings": 4
+}}
+
+Begin JSON:"""
 
 # ==================== MODAL SETUP ====================
 app = modal.App("recipe-generator-final-test")
@@ -1128,8 +1962,8 @@ image = (
 def fastapi_app():
     web_app = FastAPI(
         title="Recipe Generator API",
-        description="AI-powered recipe generator with S3 caching",
-        version="1.0.0"
+        description="AI-powered recipe generator with S3 caching and user accounts",
+        version="2.0.0"
     )
 
     web_app.add_middleware(
@@ -1143,173 +1977,269 @@ def fastapi_app():
     # Initialize model once per container
     recipe_model = RecipeModel(cache_path=CACHE_PATH)
 
+    # ============================================================
+    # LEGACY ENDPOINTS (Keep for backward compatibility)
+    # ============================================================
+
     @web_app.post("/", tags=["Recipes"])
     def generate_recipe(request: RecipeRequest):
-        """
-        🔍 Search for existing recipe in S3, or generate new one if not found
-        """
+        """Generate or fetch a recipe"""
         result = recipe_model.get_or_generate_recipe(request)
 
-        # Add debug logging
-        print("=" * 50)
-        print("📤 SENDING RESPONSE TO FRONTEND:")
-        print(f"Recipe title: {result.recipe.title}")
-        print(f"Ingredients count: {len(result.recipe.ingredients)}")
-        print(f"Instructions count: {len(result.recipe.instructions)}")
-        print(f"Source: {result.source}")
-        print("=" * 50)
+        recipe_data = {
+            "title": result.recipe.title,
+            "description": result.recipe.description,
+            "ingredients": result.recipe.ingredients,
+            "instructions": result.recipe.instructions,
+            "cook_time": result.recipe.cook_time,
+            "cuisine": result.recipe.cuisine,
+        }
 
-        # Return the recipe model directly, not from model_dump
+        # If user_id provided, save to user's folder
+        if request.user_id:
+            recipe_model.s3_manager.upload_user_recipe(recipe_data, request.user_id)
+        else:
+            # Legacy: save to general folder
+            recipe_model.s3_manager.upload_to_s3(
+                json.dumps(recipe_data),
+                folder="generated_recipes"
+            )
+
         return {
-            "recipe": {
-                "title": result.recipe.title,
-                "description": result.recipe.description,
-                "ingredients": result.recipe.ingredients,
-                "instructions": result.recipe.instructions,
-                "cook_time": result.recipe.cook_time,
-                "cuisine": result.recipe.cuisine,
-            },
+            "recipe": recipe_data,
             "source": result.source,
             "match_score": result.match_score
         }
 
-    @web_app.post("/generate-new", tags=["Recipes"])
-    def force_generate_recipe(request: RecipeRequest):
-        """
-        🤖 Force generation of a new recipe (skip S3 search)
-
-        Use this when you want a completely new recipe regardless of what's cached.
-        """
-        print("🚀 Forcing new recipe generation (skipping S3 search)")
-        recipe = recipe_model.generate_new_recipe(request)
-        return {
-            "recipe": recipe.model_dump(),
-            "source": "generated",
-            "match_score": None
-        }
-
-    @web_app.post("/search", tags=["Search"])
-    def search_recipes(request: RecipeRequest):
-        """
-        🔎 Search S3 for matching recipes without generating a new one
-
-        Returns the best matching recipe from S3 or a message if none found.
-        """
-        search_result = recipe_model.search_s3_recipes(request)
-        if search_result:
-            recipe, match_score = search_result
-            return {
-                "found": True,
-                "recipe": recipe.model_dump(),
-                "match_score": match_score,
-                "match_percentage": f"{match_score * 100:.1f}%"
-            }
-        return {
-            "found": False,
-            "message": "No matching recipes found in S3. Try /generate-new to create one!"
-        }
-
     @web_app.get("/recipes", tags=["Browse"])
     def list_recipes():
-        """
-        📋 List all generated recipes from S3
-
-        Returns metadata for all cached recipes.
-        """
+        """List all generated recipes (LEGACY)"""
         files = recipe_model.s3_manager.list_recipe_files()
         return {
             "recipes": files,
             "count": len(files),
-            "message": f"Found {len(files)} recipe(s) in cache"
         }
+
+    @web_app.get("/recipes/all", tags=["Browse"])
+    def list_all_recipes_with_data():
+        """List all recipes with full data (LEGACY)"""
+        try:
+            response = recipe_model.s3_manager.s3_client.list_objects_v2(
+                Bucket=recipe_model.s3_manager.bucket_name,
+                Prefix="model_responses/generated_recipes/"
+            )
+
+            if 'Contents' not in response:
+                return {"recipes": [], "count": 0}
+
+            recipes_with_id = []
+
+            for obj in response['Contents']:
+                try:
+                    key = obj['Key']
+                    filename = key.split('/')[-1]
+
+                    if not filename.endswith('.json'):
+                        continue
+
+                    file_obj = recipe_model.s3_manager.s3_client.get_object(
+                        Bucket=recipe_model.s3_manager.bucket_name,
+                        Key=key
+                    )
+                    recipe_data = json.loads(file_obj['Body'].read().decode('utf-8'))
+
+                    recipe_data['id'] = filename.replace('.json', '')
+                    recipe_data['filename'] = filename
+                    recipe_data['last_modified'] = obj['LastModified'].isoformat()
+
+                    recipes_with_id.append(recipe_data)
+                except Exception as e:
+                    print(f"⚠️ Error loading {obj['Key']}: {e}")
+                    continue
+
+            recipes_with_id.sort(
+                key=lambda x: x.get('last_modified', ''),
+                reverse=True
+            )
+
+            return {
+                "recipes": recipes_with_id,
+                "count": len(recipes_with_id)
+            }
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            return {"recipes": [], "count": 0, "error": str(e)}
 
     @web_app.get("/recipe/{filename}", tags=["Browse"])
     def get_recipe(filename: str):
-        """
-        📖 Get a specific recipe from S3 by filename
-
-        Example: /recipe/20240115_123456_789012.json
-        """
+        """Get a specific recipe (LEGACY)"""
         recipe = recipe_model.s3_manager.get_recipe(filename)
         if recipe:
             return recipe
-        return {
-            "error": "Recipe not found",
-            "message": f"No recipe found with filename: {filename}"
+        return {"error": "Recipe not found"}
+
+    @web_app.delete("/recipes/{filename}", tags=["Browse"])
+    def delete_recipe(filename: str):
+        """Delete a recipe (LEGACY - no user check)"""
+        try:
+            if not filename.endswith('.json'):
+                filename = f"{filename}.json"
+
+            object_key = f"model_responses/generated_recipes/{filename}"
+
+            recipe_model.s3_manager.s3_client.delete_object(
+                Bucket=recipe_model.s3_manager.bucket_name,
+                Key=object_key
+            )
+
+            return {"success": True, "message": "Recipe deleted"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ============================================================
+    # NEW USER-BASED ENDPOINTS
+    # ============================================================
+
+    @web_app.post("/user/generate", tags=["User Recipes"])
+    def generate_user_recipe(request: RecipeRequest):
+        """
+        🍳 Generate a recipe for a specific user
+        
+        Requires user_id in the request.
+        """
+        if not request.user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
+
+        result = recipe_model.get_or_generate_recipe(request)
+
+        recipe_data = {
+            "title": result.recipe.title,
+            "description": result.recipe.description,
+            "ingredients": result.recipe.ingredients,
+            "instructions": result.recipe.instructions,
+            "cook_time": result.recipe.cook_time,
+            "cuisine": result.recipe.cuisine,
         }
+
+        # Save to user's folder
+        object_key = recipe_model.s3_manager.upload_user_recipe(
+            recipe_data,
+            request.user_id
+        )
+
+        return {
+            "recipe": recipe_data,
+            "source": result.source,
+            "match_score": result.match_score,
+            "saved_to": object_key
+        }
+
+    @web_app.get("/user/{user_id}/recipes", tags=["User Recipes"])
+    def get_user_recipes(user_id: str):
+        """
+        📋 Get all recipes for a specific user
+        """
+        recipes = recipe_model.s3_manager.get_user_recipes(user_id)
+        return {
+            "recipes": recipes,
+            "count": len(recipes),
+            "user_id": user_id
+        }
+
+    @web_app.get("/user/{user_id}/recipes/{filename}", tags=["User Recipes"])
+    def get_user_recipe(user_id: str, filename: str):
+        """
+        📖 Get a specific recipe for a user
+        """
+        recipe = recipe_model.s3_manager.get_user_recipe(user_id, filename)
+        if recipe:
+            return recipe
+        raise HTTPException(status_code=404, detail="Recipe not found")
+
+    @web_app.delete("/user/{user_id}/recipes/{filename}", tags=["User Recipes"])
+    def delete_user_recipe(user_id: str, filename: str):
+        """
+        🗑️ Delete a user's recipe
+        
+        Only deletes if the recipe belongs to the specified user.
+        """
+        success, message = recipe_model.s3_manager.delete_user_recipe(
+            user_id,
+            filename
+        )
+
+        if success:
+            return {"success": True, "message": message}
+        else:
+            raise HTTPException(status_code=400, detail=message)
+
+    @web_app.get("/user/{user_id}/stats", tags=["User Recipes"])
+    def get_user_stats(user_id: str):
+        """
+        📊 Get statistics for a user's recipes
+        """
+        recipes = recipe_model.s3_manager.get_user_recipes(user_id)
+
+        cuisines = {}
+        for recipe in recipes:
+            cuisine = recipe.get('cuisine', 'Unknown')
+            cuisines[cuisine] = cuisines.get(cuisine, 0) + 1
+
+        most_popular = None
+        if cuisines:
+            most_popular = max(cuisines.items(), key=lambda x: x[1])[0]
+
+        return {
+            "user_id": user_id,
+            "total_recipes": len(recipes),
+            "cuisines": cuisines,
+            "most_popular_cuisine": most_popular
+        }
+
+    @web_app.get("/user/{user_id}/search", tags=["User Recipes"])
+    def search_user_recipes(user_id: str, q: str):
+        """
+        🔍 Search a user's recipes
+        
+        Query parameter 'q' searches title, cuisine, description, and ingredients.
+        """
+        if not q or len(q) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="Search query must be at least 2 characters"
+            )
+
+        results = recipe_model.s3_manager.search_user_recipes(user_id, q)
+        return {
+            "query": q,
+            "results": results,
+            "count": len(results)
+        }
+
+    # ============================================================
+    # SYSTEM ENDPOINTS
+    # ============================================================
 
     @web_app.get("/health", tags=["System"])
     def health_check():
-        """
-        ✅ Health check endpoint
-
-        Returns system status and S3 connection info.
-        """
-        try:
-            recipes_count = len(recipe_model.s3_manager.list_recipe_files())
-        except Exception as e:
-            print(f"Error getting recipe count: {e}")
-            recipes_count = 0
-
+        """Health check"""
         return {
             "status": "healthy",
-            "model": "loaded",
-            "s3_connected": recipe_model.s3_manager.bucket_name is not None,
-            "bucket_name": recipe_model.s3_manager.bucket_name,
-            "cached_recipes": recipes_count,
-            "cache_path": CACHE_PATH
+            "version": "2.0.0"
         }
-
-    @web_app.get("/stats", tags=["System"])
-    def get_stats():
-        """
-        📊 Get statistics about cached recipes
-
-        Returns counts by cuisine, ingredient usage, etc.
-        """
-        try:
-            recipes = recipe_model.s3_manager.get_all_recipes()
-
-            cuisines = {}
-            total_recipes = len(recipes)
-
-            for recipe in recipes:
-                cuisine = recipe.get('cuisine', 'Unknown')
-                cuisines[cuisine] = cuisines.get(cuisine, 0) + 1
-
-            most_popular = None
-            if cuisines:
-                most_popular = max(cuisines.items(), key=lambda x: x[1])[0]
-
-            return {
-                "total_recipes": total_recipes,
-                "cuisines": cuisines,
-                "most_popular_cuisine": most_popular
-            }
-        except Exception as e:
-            print(f"Error getting stats: {e}")
-            return {
-                "error": str(e),
-                "total_recipes": 0,
-                "cuisines": {}
-            }
 
     @web_app.get("/", tags=["System"])
     def root():
-        """
-        👋 Welcome endpoint
-        """
+        """Welcome endpoint"""
         return {
-            "message": "Welcome to Recipe Generator API",
-            "version": "1.0.0",
+            "message": "Welcome to Recipe Generator API v2.0",
             "endpoints": {
                 "docs": "/docs",
                 "health": "/health",
-                "stats": "/stats",
                 "generate": "POST /",
-                "force_new": "POST /generate-new",
-                "search": "POST /search",
-                "list": "GET /recipes"
+                "user_generate": "POST /user/generate",
+                "user_recipes": "GET /user/{user_id}/recipes",
+                "user_delete": "DELETE /user/{user_id}/recipes/{filename}"
             }
         }
 
