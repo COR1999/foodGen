@@ -9,6 +9,10 @@ from datetime import datetime
 from typing import Optional, List, Dict, Tuple, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+# Load environment variables from .env (project root)
+load_dotenv()
 
 # ==================== DATA MODELS ====================
 
